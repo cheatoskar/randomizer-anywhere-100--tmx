@@ -158,8 +158,14 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task<bool> IsMultiplePlayersAsync(CancellationToken cancellationToken = default)
     {
+        var playerCount = await GetPlayerCountAsync(cancellationToken);
+        return playerCount > 1;
+    }
+
+    public async Task<int> GetPlayerCountAsync(CancellationToken cancellationToken = default)
+    {
         var playerList = await Raw.CallAsync<List<object>>("GetPlayerList", [2, 0], cancellationToken);
-        return playerList.Count > 1;
+        return playerList.Count;
     }
 
     public async Task<string> GetMapNameAsync(string fileName, CancellationToken cancellationToken = default)

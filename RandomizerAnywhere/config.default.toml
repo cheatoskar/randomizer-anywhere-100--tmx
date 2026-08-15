@@ -13,7 +13,8 @@ GameSettings = "MatchSettings/Randomizer.txt"
 # Start the RMC session automatically on server boot, no player needs to type /start
 AutoStart = true
 
-# Comma-separated TMF logins allowed to use /stop, /end, /start, /preset and /presets. Empty = anyone can use them.
+# Comma-separated TMF logins allowed to use /stop, /end, /start and /preset (direct, no vote needed).
+# /presets (listing) and /votepreset (player vote) are open to everyone regardless of this setting.
 AdminLogins = ""
 
 # Port for the built-in HTTP server that hands players a download link to their own

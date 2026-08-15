@@ -12,10 +12,11 @@ internal sealed partial class RandomizerGame
     // the map gets forcefully switched away from under them
     private const int ReplaySaveGraceMs = 8000;
 
+    private const int PresetVoteWindowMs = 30000;
+
     private readonly RemoteClient client;
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
-    private readonly ServerSetup serverSetup;
     private readonly ImpossibleMaps impossibleMaps;
     private readonly DiscordNotifier discordNotifier;
     private readonly Leaderboard leaderboard;
@@ -27,16 +28,19 @@ internal sealed partial class RandomizerGame
     private int sessionStopwatchMillisecondOffset;
     private MapInfo? currentMap;
     private int? currentMapTrackId;
+    private int? pendingMapTrackId;
     private string? randomEnqueuedMapFileName;
+
+    private string? votePresetName;
+    private HashSet<string>? voteYesLogins;
 
     private bool SessionActive => sessionStopwatch is not null;
 
-    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, ServerSetup serverSetup, ImpossibleMaps impossibleMaps, DiscordNotifier discordNotifier, Leaderboard leaderboard)
+    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, ImpossibleMaps impossibleMaps, DiscordNotifier discordNotifier, Leaderboard leaderboard)
     {
         this.client = client;
         this.tmxRules = tmxRules;
         this.config = config;
-        this.serverSetup = serverSetup;
         this.impossibleMaps = impossibleMaps;
         this.discordNotifier = discordNotifier;
         this.leaderboard = leaderboard;
@@ -51,6 +55,9 @@ internal sealed partial class RandomizerGame
             ["hard"] = HardAsync,
             ["top"] = TopAsync,
             ["info"] = InfoAsync,
+            ["votepreset"] = VotePresetAsync,
+            ["yes"] = YesAsync,
+            ["no"] = NoAsync,
             ["commands"] = CommandsAsync,
             ["timelimit"] = TimeLimitAsync,
             ["tl"] = TimeLimitAsync,
@@ -81,6 +88,7 @@ internal sealed partial class RandomizerGame
                 SilverTime: (int)mapInfo["SilverTime"],
                 BronzeTime: (int)mapInfo["BronzeTime"]
             );
+            currentMapTrackId = pendingMapTrackId;
         });
 
         client.On("TrackMania.EndRace", async (methodParams, cancellationToken) =>
@@ -374,8 +382,9 @@ internal sealed partial class RandomizerGame
             "$FF0/imp$FFF - mark the current map impossible, it will never be served again",
             "$FF0/hard$FFF - flag the current map as hard for admin review (doesn't exclude it)",
             "$FF0/top$FFF - show the top finishers on this server",
+            "$FF0/votepreset <name>$FFF - propose switching preset, others confirm with $0F0/yes$FFF ($FF0/presets$FFF for names)",
             "$FF0/commands$FFF - list every raw command name",
-            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/presets$FFF, $FF0/timelimit$FFF",
+            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/timelimit$FFF",
         ], cancellationToken);
     }
 
@@ -475,27 +484,13 @@ internal sealed partial class RandomizerGame
             return;
         }
 
-        var presetName = args[0];
-        var presetPath = Path.Combine(AppContext.BaseDirectory, "Presets", presetName + ".toml");
+        var (success, displayName, error) = TryApplyPreset(args[0]);
 
-        if (!File.Exists(presetPath))
+        if (!success)
         {
-            await SendMessageAsync(login, $"$F00Preset '{presetName}' not found.", cancellationToken);
+            await SendMessageAsync(login, $"$F00{error}", cancellationToken);
             return;
         }
-
-        var presetConfig = TomlLoader.LoadPresetConfig(presetPath);
-
-        if (presetConfig is null)
-        {
-            await SendMessageAsync(login, $"$F00Failed to load preset '{presetName}'.", cancellationToken);
-            return;
-        }
-
-        presetConfig.Apply(config);
-
-        var displayName = string.IsNullOrWhiteSpace(presetConfig.DisplayName) ? presetName : presetConfig.DisplayName;
-        config.LastPreset = presetConfig;
 
         if (await client.IsMultiplePlayersAsync(cancellationToken))
         {
@@ -507,14 +502,156 @@ internal sealed partial class RandomizerGame
         }
     }
 
-    private async Task PresetsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    private (bool Success, string? DisplayName, string? Error) TryApplyPreset(string presetName)
     {
-        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        var presetPath = Path.Combine(AppContext.BaseDirectory, "Presets", presetName + ".toml");
+
+        if (!File.Exists(presetPath))
         {
-            await SendMessageAsync(login, "$F00Only server admins can view presets.", cancellationToken);
+            return (false, null, $"Preset '{presetName}' not found.");
+        }
+
+        var presetConfig = TomlLoader.LoadPresetConfig(presetPath);
+
+        if (presetConfig is null)
+        {
+            return (false, null, $"Failed to load preset '{presetName}'.");
+        }
+
+        presetConfig.Apply(config);
+        config.LastPreset = presetConfig;
+
+        var displayName = string.IsNullOrWhiteSpace(presetConfig.DisplayName) ? presetName : presetConfig.DisplayName;
+        return (true, displayName, null);
+    }
+
+    private async Task VotePresetAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length == 0)
+        {
+            await SendMessageAsync(login, "Usage: $FF0/votepreset <name>$FFF, then others type $FF0/yes$FFF to support.", cancellationToken);
             return;
         }
 
+        if (votePresetName is not null)
+        {
+            await SendMessageAsync(login, $"$F00A vote for '{votePresetName}' is already in progress.", cancellationToken);
+            return;
+        }
+
+        var presetName = args[0];
+        var presetPath = Path.Combine(AppContext.BaseDirectory, "Presets", presetName + ".toml");
+
+        if (!File.Exists(presetPath))
+        {
+            await SendMessageAsync(login, $"$F00Preset '{presetName}' not found.", cancellationToken);
+            return;
+        }
+
+        votePresetName = presetName;
+        voteYesLogins = [login];
+
+        await SendMessageAsync($"$FF0{GetNicknameOrLogin(login)} started a vote to switch to preset '{presetName}'. Type $0F0/yes$FF0 to support ({PresetVoteWindowMs / 1000}s window).", cancellationToken);
+
+        if (await HasVoteMajorityAsync(cancellationToken))
+        {
+            await FinalizeVoteAsync(cancellationToken);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(PresetVoteWindowMs, cancellationToken);
+
+                if (votePresetName != presetName)
+                {
+                    return; // already finalized or superseded
+                }
+
+                if (await HasVoteMajorityAsync(cancellationToken))
+                {
+                    await FinalizeVoteAsync(cancellationToken);
+                }
+                else
+                {
+                    await SendMessageAsync($"$F00Vote for preset '{presetName}' failed - not enough support.", cancellationToken);
+                    votePresetName = null;
+                    voteYesLogins = null;
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or TaskCanceledException)
+            {
+                // server shutting down mid-vote, nothing to do
+            }
+        }, cancellationToken);
+    }
+
+    private async Task YesAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (votePresetName is null || voteYesLogins is null)
+        {
+            await SendMessageAsync(login, "$F00No preset vote is currently active. Start one with $FF0/votepreset <name>$F00.", cancellationToken);
+            return;
+        }
+
+        voteYesLogins.Add(login);
+
+        if (await HasVoteMajorityAsync(cancellationToken))
+        {
+            await FinalizeVoteAsync(cancellationToken);
+        }
+    }
+
+    private async Task NoAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (votePresetName is null || voteYesLogins is null)
+        {
+            await SendMessageAsync(login, "$F00No preset vote is currently active.", cancellationToken);
+            return;
+        }
+
+        voteYesLogins.Remove(login);
+        await SendMessageAsync(login, "Your vote against has been noted.", cancellationToken);
+    }
+
+    private async Task<bool> HasVoteMajorityAsync(CancellationToken cancellationToken)
+    {
+        var playerCount = await client.GetPlayerCountAsync(cancellationToken);
+        return voteYesLogins is not null && voteYesLogins.Count * 2 > playerCount;
+    }
+
+    private async Task FinalizeVoteAsync(CancellationToken cancellationToken)
+    {
+        if (votePresetName is null)
+        {
+            return;
+        }
+
+        var presetName = votePresetName;
+        votePresetName = null;
+        voteYesLogins = null;
+
+        if (SessionActive)
+        {
+            await StopSessionAsync(cancellationToken);
+        }
+
+        var (success, displayName, error) = TryApplyPreset(presetName);
+
+        if (!success)
+        {
+            await SendMessageAsync($"$F00Vote passed but preset failed to apply: {error}", cancellationToken);
+            return;
+        }
+
+        await SendMessageAsync($"$0F0Vote passed! Preset $FF0{displayName}$0F0 applied.", cancellationToken);
+        await StartSessionAsync(cancellationToken);
+    }
+
+    private async Task PresetsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
         var presetsDir = Path.Combine(AppContext.BaseDirectory, "Presets");
 
         if (!Directory.Exists(presetsDir))
@@ -636,7 +773,7 @@ internal sealed partial class RandomizerGame
             await client.CallAsync("SetGameMode", [1], cancellationToken);
 
             randomEnqueuedMapFileName = mapPath;
-            currentMapTrackId = nextMap.TrackId;
+            pendingMapTrackId = nextMap.TrackId;
         }
 
         if (await client.IsMultiplePlayersAsync(cancellationToken) && (!goalReached || config.CallVoteOnFinish))
