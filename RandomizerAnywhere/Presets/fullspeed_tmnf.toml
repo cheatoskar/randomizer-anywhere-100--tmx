@@ -1,0 +1,11 @@
+DisplayName = "Fullspeed"
+Games = ["TMNF", "TMUF"]
+
+TmxGame = "TMNF"
+AutoSkipMode = "Finished"
+
+[TmxQuery]
+# "tag", not "primarytype" - see short_lol_tmnf.toml for why. 5=Fullspeed
+tag = "5"
+inunlimiter = 0
+routes = "0,2,3"

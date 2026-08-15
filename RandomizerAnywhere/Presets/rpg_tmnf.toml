@@ -5,5 +5,9 @@ TmxGame = "TMNF"
 AutoSkipMode = "Finished"
 
 [TmxQuery]
-primarytype = 9
+# "tag", not "primarytype" - see short_lol_tmnf.toml for why. 9=RPG, 11=Trial
+tag = "9,11"
+# without this, an Unlimiter-block map can lock out anyone who doesn't have the mod - and if
+# nobody online has it either, nobody can even see the map well enough to /skip past it
+inunlimiter = 0
 routes = "0,2,3"

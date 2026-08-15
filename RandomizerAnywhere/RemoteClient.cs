@@ -4,6 +4,7 @@ using Polly.Retry;
 using RandomizerAnywhere.Config;
 using System.Globalization;
 using System.Net;
+using System.Linq;
 
 namespace RandomizerAnywhere;
 
@@ -164,8 +165,19 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task<int> GetPlayerCountAsync(CancellationToken cancellationToken = default)
     {
-        var playerList = await Raw.CallAsync<List<object>>("GetPlayerList", [2, 0], cancellationToken);
-        return playerList.Count;
+        var players = await GetPlayersAsync(cancellationToken);
+        return players.Count;
+    }
+
+    // maxCount of 200 comfortably covers TMF's real player cap (well under 100) - GetPlayerCountAsync
+    // used to pass 2 here, which silently capped the reported count at 2 once a 3rd player joined
+    public async Task<IReadOnlyList<PlayerSummary>> GetPlayersAsync(CancellationToken cancellationToken = default)
+    {
+        var playerList = await Raw.CallAsync<List<object>>("GetPlayerList", [200, 0], cancellationToken);
+        return playerList.OfType<Dictionary<string, object>>()
+            .Where(p => p.TryGetValue("Login", out var login) && !string.IsNullOrEmpty(login as string))
+            .Select(p => new PlayerSummary((string)p["Login"], (string)p["NickName"]))
+            .ToList();
     }
 
     public async Task<ChallengeSummary> GetChallengeInfoAsync(string fileName, CancellationToken cancellationToken = default)

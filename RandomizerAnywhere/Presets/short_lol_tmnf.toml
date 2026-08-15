@@ -5,7 +5,10 @@ TmxGame = "TMNF"
 AutoSkipMode = "Finished"
 
 [TmxQuery]
-primarytype = 6
+# "tag", not "primarytype" - /trackrandom 404s on primarytype for any nonzero value even though
+# it's a documented field; the actual working filter is the "tag" (Tags array) parameter, verified
+# live against the real API. 6=LOL, 1=Stunt (see tmnf.exchange/api/meta/tags for the full list)
+tag = "6,1"
 authortimemax = 45000
 inunlimiter = 0
 routes = "0,2,3"
