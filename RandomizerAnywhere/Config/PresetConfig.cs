@@ -15,6 +15,10 @@ internal sealed class PresetConfig
 
     public Dictionary<string, object> TmxQuery { get; set; } = [];
 
+    // when true, ignore TmxQuery and instead pick randomly among the locally tracked
+    // impossible/cheated map ids (for admin review, not normal play)
+    public bool SourceFromImpossibleList { get; set; }
+
     public void Apply(AppConfig config)
     {
         config.TimeLimit = new TimeInt32(TimeLimit);
@@ -24,5 +28,6 @@ internal sealed class PresetConfig
         if (WelcomeMessage is not null) config.WelcomeMessage = WelcomeMessage.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
 
         config.TmxQuery = TmxQuery;
+        config.SourceFromImpossibleList = SourceFromImpossibleList;
     }
 }

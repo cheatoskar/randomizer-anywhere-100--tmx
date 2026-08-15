@@ -22,6 +22,8 @@ internal sealed class GlobalConfig
     public string PublicHost { get; set; } = string.Empty;
     public ushort ReplayServerPort { get; set; }
     public bool Lan { get; set; }
+    public string DiscordWebhookUrl { get; set; } = string.Empty;
+    public string DiscordWebhookUrlHard { get; set; } = string.Empty;
 
     public Dictionary<string, string> DownloadUrls { get; set; } = [];
     public Dictionary<string, object> TmxQuery { get; set; } = [];

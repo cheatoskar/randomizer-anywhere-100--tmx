@@ -29,9 +29,14 @@ PublicHost = ""
 # testing, MUST be false for a real internet-facing Hetzner deployment.
 Lan = false
 
+# Discord webhook URL(s) for /imp and /hard reports. DiscordWebhookUrlHard is optional -
+# leave it empty to send both /imp and /hard to the same DiscordWebhookUrl channel.
+DiscordWebhookUrl = ""
+DiscordWebhookUrlHard = ""
+
 WelcomeMessage = '''
 $FF0Welcome to $s$0BFRandomizer $FF8Anywhere$FF0!
-To skip a map, type $FF0/skip
+Type $FF0/info$FF0 to see what this server can do.
 '''
 
 [DownloadUrls]

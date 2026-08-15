@@ -7,21 +7,36 @@ namespace RandomizerAnywhere;
 
 internal sealed class TmxRules
 {
+    private const int MaxRecencyCheckedAttempts = 20;
+    private const int MaxTotalAttempts = 100;
+    private static readonly TimeSpan RecentWindow = TimeSpan.FromHours(1);
+
     private readonly HttpClient http;
     private readonly AppConfig config;
+    private readonly ImpossibleMaps impossibleMaps;
 
     private readonly GameTitle game;
+    private readonly Dictionary<int, DateTimeOffset> recentlyServed = [];
 
-    public TmxRules(HttpClient http, AppConfig config)
+    public TmxRules(HttpClient http, AppConfig config, ImpossibleMaps impossibleMaps)
     {
         this.http = http;
         this.config = config;
+        this.impossibleMaps = impossibleMaps;
 
         game = config.TmxGame ?? config.Game;
     }
 
     public string BuildQuery()
     {
+        if (config.SourceFromImpossibleList)
+        {
+            var ids = impossibleMaps.AllIds();
+            return ids.Length == 0
+                ? "id=0" // no impossible maps tracked yet - deliberately yields "not found" rather than falling back to the full pool
+                : $"id={Uri.EscapeDataString(string.Join(',', ids))}";
+        }
+
         var b = new StringBuilder();
 
         var first = true;
@@ -71,27 +86,64 @@ internal sealed class TmxRules
 
     public async Task<InMemoryFile> NextMapGbxAsync(CancellationToken cancellationToken = default)
     {
-        using var trackResponse = await NextMapGbxResponseAsync(cancellationToken);
-        var gbxBytes = await trackResponse.Content.ReadAsByteArrayAsync(cancellationToken);
-        var fileName = trackResponse.Content.Headers.ContentDisposition?.FileNameStar
-            ?? trackResponse.Content.Headers.ContentDisposition?.FileName ?? (trackResponse.RequestMessage?.RequestUri?.Segments.Last() + ".Gbx");
+        var (trackResponse, trackId) = await NextMapGbxResponseAsync(cancellationToken);
+        using (trackResponse)
+        {
+            var gbxBytes = await trackResponse.Content.ReadAsByteArrayAsync(cancellationToken);
+            var fileName = trackResponse.Content.Headers.ContentDisposition?.FileNameStar
+                ?? trackResponse.Content.Headers.ContentDisposition?.FileName ?? (trackResponse.RequestMessage?.RequestUri?.Segments.Last() + ".Gbx");
 
-        return new InMemoryFile(GetValidFileName(fileName), gbxBytes);
+            return new InMemoryFile(GetValidFileName(fileName), gbxBytes, trackId);
+        }
     }
 
-    private async Task<HttpResponseMessage> NextMapGbxResponseAsync(CancellationToken cancellationToken)
+    private async Task<(HttpResponseMessage Response, int TrackId)> NextMapGbxResponseAsync(CancellationToken cancellationToken)
     {
-        var tmxRandomUrl = $"{GetRandomTrackUrl()}?{config.TmxQueryOverride ?? BuildQuery()}";
+        for (var attempt = 1; attempt <= MaxTotalAttempts; attempt++)
+        {
+            var tmxRandomUrl = $"{GetRandomTrackUrl()}?{config.TmxQueryOverride ?? BuildQuery()}";
 
-        using var request = new HttpRequestMessage(HttpMethod.Head, tmxRandomUrl);
-        using var response = await http.SendAsync(request, cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Head, tmxRandomUrl);
+            using var response = await http.SendAsync(request, cancellationToken);
 
-        var trackRelativePath = response.Headers.Location?.OriginalString ?? throw new Exception("Failed to get track relative path.");
-        var trackId = trackRelativePath.Substring(trackRelativePath.LastIndexOf('/') + 1);
+            var trackRelativePath = response.Headers.Location?.OriginalString ?? throw new Exception("Failed to get track relative path.");
+            var trackIdString = trackRelativePath.Substring(trackRelativePath.LastIndexOf('/') + 1);
 
-        Console.WriteLine("Next track ID: " + trackId);
+            if (!int.TryParse(trackIdString, out var trackId))
+            {
+                continue;
+            }
 
-        return await http.GetAsync(GetTrackGbxUrl(trackId), cancellationToken);
+            if (!config.SourceFromImpossibleList && impossibleMaps.Contains(trackId))
+            {
+                continue;
+            }
+
+            PruneRecentlyServed();
+
+            if (recentlyServed.ContainsKey(trackId) && attempt <= MaxRecencyCheckedAttempts)
+            {
+                continue;
+            }
+
+            Console.WriteLine("Next track ID: " + trackId);
+            recentlyServed[trackId] = DateTimeOffset.UtcNow;
+
+            return (await http.GetAsync(GetTrackGbxUrl(trackIdString), cancellationToken), trackId);
+        }
+
+        throw new InvalidOperationException($"Could not find a servable map after {MaxTotalAttempts} attempts (all candidates were excluded).");
+    }
+
+    private void PruneRecentlyServed()
+    {
+        var cutoff = DateTimeOffset.UtcNow - RecentWindow;
+        var expired = recentlyServed.Where(kv => kv.Value < cutoff).Select(kv => kv.Key).ToList();
+
+        foreach (var id in expired)
+        {
+            recentlyServed.Remove(id);
+        }
     }
 
     private static string GetValidFileName(string fileName)

@@ -1,0 +1,10 @@
+DisplayName = "Short & LOL"
+Games = ["TMNF", "TMUF"]
+
+TmxGame = "TMNF"
+AutoSkipMode = "Finished"
+
+[TmxQuery]
+primarytype = 6
+authortimemax = 45000
+inunlimiter = 0

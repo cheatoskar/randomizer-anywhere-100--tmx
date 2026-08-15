@@ -1,8 +1,0 @@
-DisplayName = "Wirtual Random Map Challenge"
-Games = ["TMNF", "TMUF"]
-
-TmxGame = "TMNF"
-TimeLimit = 3600000
-
-[TmxQuery]
-name = "wirtual"

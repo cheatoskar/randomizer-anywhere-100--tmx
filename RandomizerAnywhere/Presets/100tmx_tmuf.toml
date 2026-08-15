@@ -1,9 +1,0 @@
-DisplayName = "100% TMX Project (TMUF)"
-Games = ["TMUF"]
-
-TmxGame = "TMUF"
-AutoSkipMode = "Finished"
-
-[TmxQuery]
-inhasrecord = 0
-inunlimiter = 0

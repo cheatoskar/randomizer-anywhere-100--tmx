@@ -1,7 +1,0 @@
-DisplayName = "Unbeaten AT Challenge (TMUF)"
-Games = ["TMUF"]
-
-TmxGame = "TMUF"
-
-[TmxQuery]
-inauthortimebeaten = 0

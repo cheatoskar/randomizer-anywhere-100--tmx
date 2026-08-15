@@ -16,6 +16,9 @@ internal sealed partial class RandomizerGame
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
     private readonly ServerSetup serverSetup;
+    private readonly ImpossibleMaps impossibleMaps;
+    private readonly DiscordNotifier discordNotifier;
+    private readonly Leaderboard leaderboard;
 
     private readonly Dictionary<string, Func<int, string, string[], CancellationToken, Task>> commandHandlers;
     private readonly Dictionary<string, string> nicknameCache = [];
@@ -23,16 +26,20 @@ internal sealed partial class RandomizerGame
     private Stopwatch? sessionStopwatch;
     private int sessionStopwatchMillisecondOffset;
     private MapInfo? currentMap;
+    private int? currentMapTrackId;
     private string? randomEnqueuedMapFileName;
 
     private bool SessionActive => sessionStopwatch is not null;
 
-    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, ServerSetup serverSetup)
+    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, ServerSetup serverSetup, ImpossibleMaps impossibleMaps, DiscordNotifier discordNotifier, Leaderboard leaderboard)
     {
         this.client = client;
         this.tmxRules = tmxRules;
         this.config = config;
         this.serverSetup = serverSetup;
+        this.impossibleMaps = impossibleMaps;
+        this.discordNotifier = discordNotifier;
+        this.leaderboard = leaderboard;
 
         commandHandlers = new()
         {
@@ -41,6 +48,9 @@ internal sealed partial class RandomizerGame
             ["end"] = StopAsync,
             ["skip"] = SkipAsync,
             ["imp"] = ImpossibleAsync,
+            ["hard"] = HardAsync,
+            ["top"] = TopAsync,
+            ["info"] = InfoAsync,
             ["commands"] = CommandsAsync,
             ["timelimit"] = TimeLimitAsync,
             ["tl"] = TimeLimitAsync,
@@ -76,6 +86,7 @@ internal sealed partial class RandomizerGame
         client.On("TrackMania.EndRace", async (methodParams, cancellationToken) =>
         {
             currentMap = null;
+            currentMapTrackId = null;
             randomEnqueuedMapFileName = null;
         });
 
@@ -269,6 +280,7 @@ internal sealed partial class RandomizerGame
         sessionStopwatch = null;
         sessionStopwatchMillisecondOffset = 0;
         currentMap = null;
+        currentMapTrackId = null;
         randomEnqueuedMapFileName = null;
 
         await client.CallAsync("SetTimeAttackLimit", [0], cancellationToken);
@@ -310,7 +322,61 @@ internal sealed partial class RandomizerGame
 
     private async Task ImpossibleAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
+        if (currentMapTrackId is not { } trackId)
+        {
+            await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
+            return;
+        }
 
+        await impossibleMaps.AddAsync(trackId, cancellationToken);
+
+        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
+
+        await SendMessageAsync($"$F00Map {trackId} marked impossible by {GetNicknameOrLogin(login)} - it will never be served again.", cancellationToken);
+        await discordNotifier.PostAsync($"🚫 **{GetNicknameOrLogin(login)}** marked map **{trackId}** impossible: {tmxUrl}", cancellationToken);
+
+        await NextRandomMapAsync(goalReached: false, cancellationToken);
+    }
+
+    private async Task HardAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (currentMapTrackId is not { } trackId)
+        {
+            await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
+            return;
+        }
+
+        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
+
+        await SendMessageAsync($"$FF0Map {trackId} flagged as hard by {GetNicknameOrLogin(login)} for review.", cancellationToken);
+        await discordNotifier.PostHardAsync($"⚠️ **{GetNicknameOrLogin(login)}** flagged map **{trackId}** as hard: {tmxUrl}", cancellationToken);
+    }
+
+    private async Task TopAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        var top = leaderboard.GetTop(5);
+
+        if (top.Count == 0)
+        {
+            await SendMessageAsync(login, "$F00No finishes recorded yet.", cancellationToken);
+            return;
+        }
+
+        var lines = top.Select((entry, i) => $"{i + 1}. $FF0{entry.LastNickname}$FFF - {entry.Finishes} finish(es)");
+        await SendMessageAsync(login, ["Top finishers on this server:", .. lines], cancellationToken);
+    }
+
+    private async Task InfoAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        await SendMessageAsync(login, [
+            "$0BF--- 100% TMX Project ---",
+            "$FF0/skip$FFF - skip the current map (votes if multiple players are online)",
+            "$FF0/imp$FFF - mark the current map impossible, it will never be served again",
+            "$FF0/hard$FFF - flag the current map as hard for admin review (doesn't exclude it)",
+            "$FF0/top$FFF - show the top finishers on this server",
+            "$FF0/commands$FFF - list every raw command name",
+            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/presets$FFF, $FF0/timelimit$FFF",
+        ], cancellationToken);
     }
 
     private async Task CommandsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -515,6 +581,7 @@ internal sealed partial class RandomizerGame
             }
             await SendFrozenTimeMessageAsync(cancellationToken);
 
+            await leaderboard.RecordFinishAsync(login, GetNicknameOrLogin(login), cancellationToken);
             await SendReplayLinkAsync(login, cancellationToken);
             await Task.Delay(ReplaySaveGraceMs, cancellationToken);
 
@@ -569,6 +636,7 @@ internal sealed partial class RandomizerGame
             await client.CallAsync("SetGameMode", [1], cancellationToken);
 
             randomEnqueuedMapFileName = mapPath;
+            currentMapTrackId = nextMap.TrackId;
         }
 
         if (await client.IsMultiplePlayersAsync(cancellationToken) && (!goalReached || config.CallVoteOnFinish))

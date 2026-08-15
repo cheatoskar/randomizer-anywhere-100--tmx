@@ -1,0 +1,7 @@
+DisplayName = "Impossible Review"
+Games = ["TMNF", "TMUF"]
+
+TmxGame = "TMNF"
+AutoSkipMode = "None"
+
+SourceFromImpossibleList = true

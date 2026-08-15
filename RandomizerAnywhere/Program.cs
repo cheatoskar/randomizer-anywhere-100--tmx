@@ -4,11 +4,28 @@ using Microsoft.Extensions.Http.Resilience;
 using Polly;
 using RandomizerAnywhere;
 using RandomizerAnywhere.Config;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
+
+using var cts = new CancellationTokenSource();
 
 var provider = new AppServiceProvider();
 
+var impossibleMaps = provider.GetRequiredService<ImpossibleMaps>();
+await impossibleMaps.LoadAsync();
+
+var leaderboard = provider.GetRequiredService<Leaderboard>();
+await leaderboard.LoadAsync();
+
 var serverSetup = provider.GetRequiredService<ServerSetup>();
 await serverSetup.TrySetupAsync();
+
+using var sigTermRegistration = PosixSignalRegistration.Create(PosixSignal.SIGTERM, ctx =>
+{
+    ctx.Cancel = true;
+    cts.Cancel();
+    serverSetup.StopServer();
+});
 
 var appConfig = provider.GetRequiredService<AppConfig>();
 if (appConfig.DedicatedServerMode)
@@ -17,11 +34,27 @@ if (appConfig.DedicatedServerMode)
     await replayServer.StartAsync();
 }
 
-var randomizerSetup = provider.GetRequiredService<RandomizerSetup>();
-await randomizerSetup.RunAsync();
+try
+{
+    var randomizerSetup = provider.GetRequiredService<RandomizerSetup>();
+    await randomizerSetup.RunAsync(cts.Token);
 
-var randomizerGame = provider.GetRequiredService<RandomizerGame>();
-await randomizerGame.RunAsync();
+    var randomizerGame = provider.GetRequiredService<RandomizerGame>();
+    await randomizerGame.RunAsync(cts.Token);
+}
+catch (OperationCanceledException) when (cts.IsCancellationRequested)
+{
+    // graceful shutdown requested (e.g. systemd stop)
+}
+catch (Exception ex) when (cts.IsCancellationRequested && ex is IOException or SocketException)
+{
+    // the XML-RPC socket can drop out from under us while the dedicated server process is
+    // being killed during shutdown; expected in that case, not a real failure
+}
+finally
+{
+    serverSetup.StopServer();
+}
 
 [ServiceProvider]
 [Singleton(typeof(HttpClient), Factory = nameof(CreateHttpClient))]
@@ -31,6 +64,9 @@ await randomizerGame.RunAsync();
 [Transient(typeof(RandomizerSetup))]
 [Singleton(typeof(RemoteClient))]
 [Transient(typeof(RandomizerGame))]
+[Singleton(typeof(ImpossibleMaps))]
+[Singleton(typeof(DiscordNotifier))]
+[Singleton(typeof(Leaderboard))]
 internal partial class AppServiceProvider
 {
     public static HttpClient CreateHttpClient()
@@ -91,6 +127,8 @@ internal partial class AppServiceProvider
             PublicHost = Configurator.GetString(globalConfig.PublicHost, cmdValue: null, "RANDANY_PUBLIC_HOST"),
             ReplayServerPort = Configurator.GetNumber(globalConfig.ReplayServerPort, cmdValue: null, "RANDANY_REPLAY_SERVER_PORT"),
             Lan = Configurator.GetBool(globalConfig.Lan, cmdValue: null, "RANDANY_LAN"),
+            DiscordWebhookUrl = Configurator.GetString(globalConfig.DiscordWebhookUrl, cmdValue: null, "RANDANY_DISCORD_WEBHOOK_URL"),
+            DiscordWebhookUrlHard = Configurator.GetString(globalConfig.DiscordWebhookUrlHard, cmdValue: null, "RANDANY_DISCORD_WEBHOOK_URL_HARD"),
         };
 
         if (!string.IsNullOrWhiteSpace(globalConfig.Preset))

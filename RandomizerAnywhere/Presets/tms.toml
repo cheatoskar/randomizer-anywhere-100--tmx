@@ -1,5 +1,0 @@
-DisplayName = "Random Map Challenge (TMS)"
-Games = ["TMS", "TMUF"]
-
-TmxGame = "TMS"
-TimeLimit = 3600000

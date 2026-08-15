@@ -1,3 +1,3 @@
 ﻿namespace RandomizerAnywhere;
 
-internal sealed record InMemoryFile(string FileName, byte[] Data);
+internal sealed record InMemoryFile(string FileName, byte[] Data, int TrackId);

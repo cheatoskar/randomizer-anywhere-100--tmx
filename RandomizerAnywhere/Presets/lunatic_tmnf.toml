@@ -1,0 +1,9 @@
+DisplayName = "Lunatic"
+Games = ["TMNF", "TMUF"]
+
+TmxGame = "TMNF"
+AutoSkipMode = "Finished"
+
+[TmxQuery]
+difficulty = 4
+inunlimiter = 0

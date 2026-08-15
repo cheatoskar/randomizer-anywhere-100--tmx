@@ -1,0 +1,8 @@
+DisplayName = "RPG Together"
+Games = ["TMNF", "TMUF"]
+
+TmxGame = "TMNF"
+AutoSkipMode = "Finished"
+
+[TmxQuery]
+primarytype = 9
