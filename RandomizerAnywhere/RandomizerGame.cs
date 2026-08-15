@@ -17,7 +17,9 @@ internal sealed partial class RandomizerGame
 
     // AGPLv3 §13: this is a modified version, so users interacting with it over the network
     // must be able to get its Corresponding Source - see /source command below.
-    private const string SourceRepoUrl = "https://github.com/cheatoskar/randomizer-anywhere-100--tmx";
+    // TMF's chat "$l[...]" link syntax only reliably handles "http://" links - an "https://" URL
+    // here gets "http://" prepended on top by the client, producing a broken doubled-scheme link.
+    private const string SourceRepoUrl = "http://github.com/cheatoskar/randomizer-anywhere-100--tmx";
 
     private readonly RemoteClient client;
     private readonly TmxRules tmxRules;
@@ -276,9 +278,6 @@ internal sealed partial class RandomizerGame
 
         await SendWelcomeMessageAsync(login: null, cancellationToken);
         await SendTop10PanelAsync(cancellationToken);
-
-        Console.WriteLine("DEBUG cp manialink:\n" + BuildCheckpointManialink(3, 10));
-        Console.WriteLine("DEBUG top10 manialink:\n" + BuildTop10Manialink([new LeaderboardEntry("TestPlayer", 5)]));
 
         _ = StatusWriteLoopAsync(cancellationToken);
 
@@ -1073,8 +1072,8 @@ internal sealed partial class RandomizerGame
 
     private static string BuildCheckpointManialink(int current, int total) => $"""
         <manialink id="cp_counter" version="1">
-            <quad posn="-62 42 4" sizen="26 8" halign="left" valign="center" bgcolor="000A"/>
-            <label posn="-60 40 5" halign="left" valign="center" textsize="2.5" textcolor="FFFF" text="CP {current} / {total}"/>
+            <quad posn="-64 37 4" sizen="13 5" halign="left" valign="center" bgcolor="000A"/>
+            <label posn="-63 37 5" halign="left" valign="center" textsize="2.5" textcolor="FFFF" text="CP {current} / {total}"/>
         </manialink>
         """;
 
@@ -1097,7 +1096,7 @@ internal sealed partial class RandomizerGame
 
         return $"""
             <manialink id="top10_panel" version="1">
-                <quad posn="20 20 4" sizen="44 {boxHeight}" halign="left" valign="top" bgcolor="000A"/>
+                <quad posn="64 20 4" sizen="14 {boxHeight}" halign="right" valign="top" bgcolor="000A"/>
                 {rows}
             </manialink>
             """;

@@ -6,3 +6,4 @@ AutoSkipMode = "Finished"
 
 [TmxQuery]
 primarytype = 9
+routes = "0,2,3"

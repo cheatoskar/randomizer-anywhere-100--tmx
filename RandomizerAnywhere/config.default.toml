@@ -37,7 +37,8 @@ DiscordWebhookUrl = ""
 DiscordWebhookUrlHard = ""
 
 WelcomeMessage = '''
-$FF0Welcome to $s$0BFRandomizer $FF8Anywhere$FF0!
+Built on $FF0Randomizer Anywhere$FF0 (modified) - type $FF0/source$FF0 for the code.
+$FF0Welcome to $s$0BF100% TMX $FF8Project$FF0!
 Type $FF0/info$FF0 to see what this server can do.
 '''
 
@@ -48,3 +49,4 @@ TM = "http://slig.free.fr/TM/dedicated/TmDedicatedServer_2006-05-30.zip"
 [TmxQuery]
 primarytype = 0
 inunlimiter = 0
+routes = "0,2,3"

@@ -7,3 +7,4 @@ AutoSkipMode = "Finished"
 [TmxQuery]
 difficulty = 4
 inunlimiter = 0
+routes = "0,2,3"
