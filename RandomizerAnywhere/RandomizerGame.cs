@@ -17,7 +17,6 @@ internal sealed partial class RandomizerGame
     private readonly RemoteClient client;
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
-    private readonly ImpossibleMaps impossibleMaps;
     private readonly DiscordNotifier discordNotifier;
     private readonly Leaderboard leaderboard;
 
@@ -36,12 +35,11 @@ internal sealed partial class RandomizerGame
 
     private bool SessionActive => sessionStopwatch is not null;
 
-    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, ImpossibleMaps impossibleMaps, DiscordNotifier discordNotifier, Leaderboard leaderboard)
+    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, DiscordNotifier discordNotifier, Leaderboard leaderboard)
     {
         this.client = client;
         this.tmxRules = tmxRules;
         this.config = config;
-        this.impossibleMaps = impossibleMaps;
         this.discordNotifier = discordNotifier;
         this.leaderboard = leaderboard;
 
@@ -336,12 +334,10 @@ internal sealed partial class RandomizerGame
             return;
         }
 
-        await impossibleMaps.AddAsync(trackId, cancellationToken);
-
         var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
 
-        await SendMessageAsync($"$F00Map {trackId} marked impossible by {GetNicknameOrLogin(login)} - it will never be served again.", cancellationToken);
-        await discordNotifier.PostAsync($"🚫 **{GetNicknameOrLogin(login)}** marked map **{trackId}** impossible: {tmxUrl}", cancellationToken);
+        await SendMessageAsync($"$F00Map {trackId} reported impossible by {GetNicknameOrLogin(login)} - pending review, skipping for now.", cancellationToken);
+        await discordNotifier.PostAsync($"🚫 **{GetPlainNickname(login)}** reported map **{trackId}** as impossible: {tmxUrl}", cancellationToken);
 
         await NextRandomMapAsync(goalReached: false, cancellationToken);
     }
@@ -357,7 +353,7 @@ internal sealed partial class RandomizerGame
         var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
 
         await SendMessageAsync($"$FF0Map {trackId} flagged as hard by {GetNicknameOrLogin(login)} for review.", cancellationToken);
-        await discordNotifier.PostHardAsync($"⚠️ **{GetNicknameOrLogin(login)}** flagged map **{trackId}** as hard: {tmxUrl}", cancellationToken);
+        await discordNotifier.PostHardAsync($"⚠️ **{GetPlainNickname(login)}** flagged map **{trackId}** as hard: {tmxUrl}", cancellationToken);
     }
 
     private async Task TopAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -852,6 +848,16 @@ internal sealed partial class RandomizerGame
         return nicknameCache.TryGetValue(login, out var nickname) ? $"$<{nickname}$>" : login;
     }
 
+    // plain-text nickname for destinations that don't understand TM's $-formatting codes (e.g. Discord)
+    private string GetPlainNickname(string login)
+    {
+        var nickname = nicknameCache.TryGetValue(login, out var nick) ? nick : login;
+        return TmFormatCodeRegex().Replace(nickname, string.Empty);
+    }
+
     [GeneratedRegex(@"[^\s""]+|""[^""]*""")]
     private static partial Regex CommandArgsRegex();
+
+    [GeneratedRegex(@"\$([0-9a-fA-F]{3}|[<>oiswnmgzt$])")]
+    private static partial Regex TmFormatCodeRegex();
 }

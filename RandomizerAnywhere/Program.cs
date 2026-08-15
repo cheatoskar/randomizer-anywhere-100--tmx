@@ -13,6 +13,7 @@ var provider = new AppServiceProvider();
 
 var impossibleMaps = provider.GetRequiredService<ImpossibleMaps>();
 await impossibleMaps.LoadAsync();
+_ = impossibleMaps.RunPeriodicRefreshAsync(TimeSpan.FromHours(24), cts.Token);
 
 var leaderboard = provider.GetRequiredService<Leaderboard>();
 await leaderboard.LoadAsync();

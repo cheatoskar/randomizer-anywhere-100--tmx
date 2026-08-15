@@ -58,6 +58,13 @@ internal sealed class ImpossibleMaps
             }
         }
 
+        await RefreshFromSheetAsync(cancellationToken);
+    }
+
+    // re-pulls the community-curated sheet so maps added there (after Discord review) start
+    // getting excluded without needing a restart
+    public async Task RefreshFromSheetAsync(CancellationToken cancellationToken = default)
+    {
         try
         {
             var csv = await FetchFollowingRedirectsAsync(SheetCsvUrl, cancellationToken);
@@ -97,6 +104,15 @@ internal sealed class ImpossibleMaps
         await SaveAsync(cancellationToken);
     }
 
+    public async Task RunPeriodicRefreshAsync(TimeSpan interval, CancellationToken cancellationToken = default)
+    {
+        while (true)
+        {
+            await Task.Delay(interval, cancellationToken);
+            await RefreshFromSheetAsync(cancellationToken);
+        }
+    }
+
     private async Task<string> FetchFollowingRedirectsAsync(string url, CancellationToken cancellationToken, int maxRedirects = 5)
     {
         for (var i = 0; i < maxRedirects; i++)
@@ -115,16 +131,6 @@ internal sealed class ImpossibleMaps
         }
 
         throw new Exception($"Too many redirects fetching {url}.");
-    }
-
-    public async Task AddAsync(int trackId, CancellationToken cancellationToken = default)
-    {
-        lock (gate)
-        {
-            excludedTrackIds.Add(trackId);
-        }
-
-        await SaveAsync(cancellationToken);
     }
 
     private async Task SaveAsync(CancellationToken cancellationToken)
