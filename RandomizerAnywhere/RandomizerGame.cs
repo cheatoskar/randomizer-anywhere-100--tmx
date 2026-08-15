@@ -16,9 +16,6 @@ internal sealed partial class RandomizerGame
     private const int PresetVoteWindowMs = 30000;
 
     // AGPLv3 §13: this is a modified version, so users interacting with it over the network
-    // must be able to get its Corresponding Source - see /source command below.
-    // TMF's chat "$l[...]" link syntax only reliably handles "http://" links - an "https://" URL
-    // here gets "http://" prepended on top by the client, producing a broken doubled-scheme link.
     private const string SourceRepoUrl = "http://github.com/cheatoskar/randomizer-anywhere-100--tmx";
 
     private readonly RemoteClient client;
@@ -92,21 +89,21 @@ internal sealed partial class RandomizerGame
     {
         client.On("TrackMania.BeginRace", async (methodParams, cancellationToken) =>
         {
-            var mapInfo = (Dictionary<string, object>)methodParams[0];
-
-            currentMap = new MapInfo(
-                AuthorTime: (int)mapInfo["AuthorTime"],
-                GoldTime: (int)mapInfo["GoldTime"],
-                SilverTime: (int)mapInfo["SilverTime"],
-                BronzeTime: (int)mapInfo["BronzeTime"]
-            );
-            currentMapTrackId = pendingMapTrackId;
-
-            playerCheckpointProgress.Clear();
-            currentMapCheckpointTotal = null;
-
             try
             {
+                var mapInfo = (Dictionary<string, object>)methodParams[0];
+
+                currentMap = new MapInfo(
+                    AuthorTime: (int)mapInfo["AuthorTime"],
+                    GoldTime: (int)mapInfo["GoldTime"],
+                    SilverTime: (int)mapInfo["SilverTime"],
+                    BronzeTime: (int)mapInfo["BronzeTime"]
+                );
+                currentMapTrackId = pendingMapTrackId;
+
+                playerCheckpointProgress.Clear();
+                currentMapCheckpointTotal = null;
+
                 var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
                 currentMapCheckpointTotal = info.NbCheckpoints;
 
@@ -117,110 +114,148 @@ internal sealed partial class RandomizerGame
             }
             catch (Exception ex)
             {
+                // an unhandled exception here would kill the callback dispatch loop entirely,
+                // silently freezing every future event (joins, chat, finishes, the status page) -
+                // every handler below is wrapped for the same reason
                 Console.WriteLine($"Warning: checkpoint HUD setup failed - {ex.Message}");
             }
         });
 
         client.On("TrackMania.EndRace", async (methodParams, cancellationToken) =>
         {
-            currentMap = null;
-            currentMapTrackId = null;
-            randomEnqueuedMapFileName = null;
-            currentMapCheckpointTotal = null;
-            playerCheckpointProgress.Clear();
-            // not hiding the manialink here: SendHideManialinkPage has no per-widget id to target
-            // without also nuking the always-on top10 panel, and BeginRace overwrites the CP
-            // counter text for the next map anyway, so the stale text is only visible for a moment
+            try
+            {
+                currentMap = null;
+                currentMapTrackId = null;
+                randomEnqueuedMapFileName = null;
+                currentMapCheckpointTotal = null;
+                playerCheckpointProgress.Clear();
+                // not hiding the manialink here: SendHideManialinkPage has no per-widget id to target
+                // without also nuking the always-on top10 panel, and BeginRace overwrites the CP
+                // counter text for the next map anyway, so the stale text is only visible for a moment
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: EndRace handling failed - {ex.Message}");
+            }
         });
 
         client.On("TrackMania.PlayerCheckpoint", async (methodParams, cancellationToken) =>
         {
-            var login = (string)methodParams[1];
-            var checkpointIndex = (int)methodParams[4];
-
-            if (currentMapCheckpointTotal is not { } total)
-            {
-                return;
-            }
-
-            var current = checkpointIndex + 1;
-            playerCheckpointProgress[login] = current;
-
             try
             {
+                var login = (string)methodParams[1];
+                var checkpointIndex = (int)methodParams[4];
+
+                if (currentMapCheckpointTotal is not { } total)
+                {
+                    return;
+                }
+
+                var current = checkpointIndex + 1;
+                playerCheckpointProgress[login] = current;
+
                 await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(current, total), cancellationToken: cancellationToken);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Warning: failed to update checkpoint HUD for {login} - {ex.Message}");
+                Console.WriteLine($"Warning: failed to update checkpoint HUD - {ex.Message}");
             }
         });
 
         client.On("TrackMania.PlayerConnect", async (methodParams, cancellationToken) =>
         {
-            var login = (string)methodParams[0];
-
-            nicknameCache[login] = await client.GetPlayerNicknameAsync(login, cancellationToken);
-
-            await SendWelcomeMessageAsync(login, cancellationToken);
-            await SendTop10PanelAsync(cancellationToken);
-
-            if (currentMapCheckpointTotal is { } total)
+            try
             {
-                try
+                var login = (string)methodParams[0];
+
+                nicknameCache[login] = await client.GetPlayerNicknameAsync(login, cancellationToken);
+
+                await SendWelcomeMessageAsync(login, cancellationToken);
+                await SendTop10PanelAsync(cancellationToken);
+
+                if (currentMapCheckpointTotal is { } total)
                 {
                     await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(0, total), cancellationToken: cancellationToken);
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Warning: failed to show checkpoint HUD to {login} - {ex.Message}");
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: PlayerConnect handling failed - {ex.Message}");
             }
         });
 
         client.On("TrackMania.PlayerChat", async (methodParams, cancellationToken) =>
         {
-            var playerUid = (int)methodParams[0];
-            var login = (string)methodParams[1];
-            var message = (string)methodParams[2];
-            var isRegisteredCmd = (bool)methodParams[3];
-
-            if (isRegisteredCmd)
+            try
             {
-                await OnCommand(playerUid, login, message, cancellationToken);
+                var playerUid = (int)methodParams[0];
+                var login = (string)methodParams[1];
+                var message = (string)methodParams[2];
+                var isRegisteredCmd = (bool)methodParams[3];
+
+                if (isRegisteredCmd)
+                {
+                    await OnCommand(playerUid, login, message, cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: chat command handling failed - {ex.Message}");
             }
         });
 
         client.On("TrackMania.PlayerFinish", async (methodParams, cancellationToken) =>
         {
-            var playerUid = (int)methodParams[0];
-            var login = (string)methodParams[1];
-            var score = (int)methodParams[2];
+            try
+            {
+                var playerUid = (int)methodParams[0];
+                var login = (string)methodParams[1];
+                var score = (int)methodParams[2];
 
-            await OnPlayerFinish(playerUid, login, score, cancellationToken);
+                await OnPlayerFinish(playerUid, login, score, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: PlayerFinish handling failed - {ex.Message}");
+            }
         });
 
         client.On("TrackMania.StatusChanged", async (methodParams, cancellationToken) =>
         {
-            var statusCode = (TrackManiaStatusCode)(int)methodParams[0];
-
-            if (SessionActive)
+            try
             {
-                switch (statusCode)
+                var statusCode = (TrackManiaStatusCode)(int)methodParams[0];
+
+                if (SessionActive)
                 {
-                    case TrackManiaStatusCode.Play:
-                        sessionStopwatch?.Start();
-                        break;
-                    case TrackManiaStatusCode.Finish:
-                        await FinishMapAsync(cancellationToken);
-                        break;
+                    switch (statusCode)
+                    {
+                        case TrackManiaStatusCode.Play:
+                            sessionStopwatch?.Start();
+                            break;
+                        case TrackManiaStatusCode.Finish:
+                            await FinishMapAsync(cancellationToken);
+                            break;
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: StatusChanged handling failed - {ex.Message}");
             }
         });
 
         client.On("TrackMania.EndRound", async (methodParams, cancellationToken) =>
         {
-            await FinishMapAsync(cancellationToken);
+            try
+            {
+                await FinishMapAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: EndRound handling failed - {ex.Message}");
+            }
         });
     }
 
@@ -922,7 +957,7 @@ internal sealed partial class RandomizerGame
             }
             await SendFrozenTimeMessageAsync(cancellationToken);
 
-            await leaderboard.RecordFinishAsync(login, GetPlainNickname(login), cancellationToken);
+            await leaderboard.RecordFinishAsync(login, GetPlainNickname(login), GetRawNickname(login), cancellationToken);
             await SendTop10PanelAsync(cancellationToken);
             await SendReplayLinkAsync(login, cancellationToken);
             await Task.Delay(ReplaySaveGraceMs, cancellationToken);
@@ -1077,17 +1112,29 @@ internal sealed partial class RandomizerGame
         </manialink>
         """;
 
+    private const int Top10NicknameCharLimit = 20;
+
     private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top)
     {
         var rows = new System.Text.StringBuilder();
         var y = 16;
 
-        rows.AppendLine("""<label posn="62 18 5" halign="right" valign="center" textsize="1.8" textcolor="FF0F" text="Top Finishers"/>""");
+        rows.AppendLine("""<label posn="62 18 5" halign="right" valign="center" textsize="1.9" textcolor="FF0F" text="$s$oTop Finishers"/>""");
 
         for (var i = 0; i < top.Count; i++)
         {
             var entry = top[i];
-            var text = System.Security.SecurityElement.Escape($"{i + 1}. {entry.LastNickname} - {entry.Finishes}");
+
+            // names within the limit keep their real in-game color; longer ones fall back to
+            // plain, truncated text - cutting a colored string could slice a $-code in half and
+            // bleed its color into the rest of the panel. Reset with "$z" rather than wrapping in
+            // "$<...$>" - TMF's manialink parser isn't standards-compliant XML, so a literal "<"/">"
+            // here would get entity-escaped below and might not get decoded back by the game
+            var displayName = entry.LastNickname.Length > Top10NicknameCharLimit
+                ? entry.LastNickname[..Top10NicknameCharLimit] + "…"
+                : string.IsNullOrEmpty(entry.RawNickname) ? entry.LastNickname : entry.RawNickname;
+
+            var text = System.Security.SecurityElement.Escape($"{i + 1}. {displayName} $z$FFF- {entry.Finishes}");
             y -= 4;
             rows.AppendLine($"""<label posn="62 {y} 5" halign="right" valign="center" textsize="1.2" textcolor="FFFF" text="{text}"/>""");
         }
@@ -1107,6 +1154,13 @@ internal sealed partial class RandomizerGame
     {
         var nickname = nicknameCache.TryGetValue(login, out var nick) ? nick : login;
         return TmFormatCodeRegex().Replace(nickname, string.Empty);
+    }
+
+    // nickname with its original $-formatting codes intact, for HUD/manialink text (which renders
+    // them the same way in-game chat does) - not safe for Discord/the status page, see GetPlainNickname
+    private string GetRawNickname(string login)
+    {
+        return nicknameCache.TryGetValue(login, out var nick) ? nick : login;
     }
 
     [GeneratedRegex(@"[^\s""]+|""[^""]*""")]

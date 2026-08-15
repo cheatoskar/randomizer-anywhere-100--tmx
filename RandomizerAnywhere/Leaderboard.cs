@@ -2,7 +2,9 @@ using System.Text.Json;
 
 namespace RandomizerAnywhere;
 
-internal sealed record LeaderboardEntry(string LastNickname, int Finishes);
+// LastNickname is stripped of $-formatting codes (safe for Discord/the status page).
+// RawNickname keeps the original $-codes so the in-game HUD can show the player's real name color.
+internal sealed record LeaderboardEntry(string LastNickname, int Finishes, string RawNickname = "");
 
 internal sealed class Leaderboard
 {
@@ -36,12 +38,12 @@ internal sealed class Leaderboard
         }
     }
 
-    public async Task RecordFinishAsync(string login, string nickname, CancellationToken cancellationToken = default)
+    public async Task RecordFinishAsync(string login, string nickname, string rawNickname, CancellationToken cancellationToken = default)
     {
         lock (gate)
         {
             var finishes = entries.TryGetValue(login, out var existing) ? existing.Finishes + 1 : 1;
-            entries[login] = new LeaderboardEntry(nickname, finishes);
+            entries[login] = new LeaderboardEntry(nickname, finishes, rawNickname);
         }
 
         await SaveAsync(cancellationToken);
