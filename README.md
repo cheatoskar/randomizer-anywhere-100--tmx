@@ -6,6 +6,8 @@ Instead of hooking into your local game client, Randomizer Anywhere downloads, c
 
 This project was made to support the [100% TMX Project](https://discord.gg/HRShWnzpK3).
 
+> **This is a modified fork** of [BigBang1112/randomizer-anywhere](https://github.com/BigBang1112/randomizer-anywhere), licensed under [AGPLv3](LICENSE). Changes since 2026-08 add impossible/hard map reporting, a leaderboard, Discord alerts, preset voting, a live status page, Linux dedicated server support, and other features for the 100% TMX Project. Source of this fork: https://github.com/cheatoskar/randomizer-anywhere-100--tmx
+
 ## Supported games
 
 | Game | Dedicated server |
@@ -123,6 +125,7 @@ The final configuration state is then written into session data for leaderboard 
 | `/preset <name>` | Applies a bundled preset by name (only while no session is active). |
 | `/presets` | Lists all available presets. |
 | `/commands` | Lists all available chat commands. |
+| `/source` | Links to the source code of this modified server (AGPLv3 compliance). |
 
 ## Special thanks
 

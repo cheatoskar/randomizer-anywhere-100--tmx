@@ -8,7 +8,7 @@ TimeLimit = 3600000
 Preset = "100tmx_tmnf"
 
 ServerName = "100% TMX Project"
-ServerComment = "100% TMX RMC - random maps, first to finish wins. Type /info in chat."
+ServerComment = "100% TMX RMC - random maps, first to finish wins. Type /info or /source in chat."
 GameSettings = "MatchSettings/Randomizer.txt"
 
 # Start the RMC session automatically on server boot, no player needs to type /start

@@ -168,10 +168,45 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         return playerList.Count;
     }
 
-    public async Task<string> GetMapNameAsync(string fileName, CancellationToken cancellationToken = default)
+    public async Task<ChallengeSummary> GetChallengeInfoAsync(string fileName, CancellationToken cancellationToken = default)
     {
         var mapInfo = await Raw.CallAsync<Dictionary<string, object>>("GetChallengeInfo", [fileName], cancellationToken);
-        return (string)mapInfo["Name"];
+        return ToChallengeSummary(mapInfo);
+    }
+
+    // unlike GetChallengeInfo(fileName), which can report placeholder values (e.g. NbCheckpoints = -1)
+    // for a challenge that's only queued and not yet actively loaded, this reflects the map that's
+    // actually running right now
+    public async Task<ChallengeSummary> GetCurrentChallengeInfoAsync(CancellationToken cancellationToken = default)
+    {
+        var mapInfo = await Raw.CallAsync<Dictionary<string, object>>("GetCurrentChallengeInfo", [], cancellationToken);
+        return ToChallengeSummary(mapInfo);
+    }
+
+    public async Task SendManialinkPageAsync(string manialink, int timeoutSeconds = 0, bool hideOnClick = false, CancellationToken cancellationToken = default)
+    {
+        await Raw.CallAsync("SendDisplayManialinkPage", [manialink, timeoutSeconds, hideOnClick], cancellationToken);
+    }
+
+    public async Task SendManialinkPageToLoginAsync(string login, string manialink, int timeoutSeconds = 0, bool hideOnClick = false, CancellationToken cancellationToken = default)
+    {
+        await Raw.CallAsync("SendDisplayManialinkPageToLogin", [login, manialink, timeoutSeconds, hideOnClick], cancellationToken);
+    }
+
+    public async Task HideManialinkPageByIdAsync(string id, CancellationToken cancellationToken = default)
+    {
+        await Raw.CallAsync("SendHideManialinkPageToId", [id], cancellationToken);
+    }
+
+    public async Task HideAllManialinksAsync(CancellationToken cancellationToken = default)
+    {
+        await Raw.CallAsync("SendHideManialinkPage", [], cancellationToken);
+    }
+
+    private static ChallengeSummary ToChallengeSummary(Dictionary<string, object> mapInfo)
+    {
+        var nbCheckpoints = mapInfo.TryGetValue("NbCheckpoints", out var cp) && (int)cp >= 0 ? (int)cp : (int?)null;
+        return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints);
     }
 
     public void On(string methodName, Func<object[], CancellationToken, Task> handler)

@@ -101,6 +101,10 @@ internal sealed class ReplayServer
                         <div class="value" id="player-count">-</div>
                         <div class="label">players online</div>
                     </div>
+                    <div class="stat">
+                        <div class="value" id="checkpoint-count">-</div>
+                        <div class="label">checkpoints</div>
+                    </div>
                 </div>
             </div>
 
@@ -121,6 +125,7 @@ internal sealed class ReplayServer
                     document.getElementById('server-name').textContent = s.ServerName || '100% TMX Project';
                     document.getElementById('session-state').textContent = s.SessionActive ? 'Live' : 'Session stopped';
                     document.getElementById('player-count').textContent = s.PlayerCount ?? '0';
+                    document.getElementById('checkpoint-count').textContent = s.CurrentMapCheckpoints ?? '-';
                     document.getElementById('map-name').textContent = s.CurrentMapName || 'No map loaded';
 
                     const link = document.getElementById('map-link');

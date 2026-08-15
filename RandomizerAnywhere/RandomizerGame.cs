@@ -15,6 +15,10 @@ internal sealed partial class RandomizerGame
 
     private const int PresetVoteWindowMs = 30000;
 
+    // AGPLv3 §13: this is a modified version, so users interacting with it over the network
+    // must be able to get its Corresponding Source - see /source command below.
+    private const string SourceRepoUrl = "https://github.com/cheatoskar/randomizer-anywhere-100--tmx";
+
     private readonly RemoteClient client;
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
@@ -33,6 +37,9 @@ internal sealed partial class RandomizerGame
 
     private string? votePresetName;
     private HashSet<string>? voteYesLogins;
+
+    private int? currentMapCheckpointTotal;
+    private readonly Dictionary<string, int> playerCheckpointProgress = [];
 
     private bool SessionActive => sessionStopwatch is not null;
 
@@ -56,10 +63,12 @@ internal sealed partial class RandomizerGame
             ["rank"] = RankAsync,
             ["map"] = MapAsync,
             ["info"] = InfoAsync,
+            ["testhud"] = TestHudAsync,
             ["votepreset"] = VotePresetAsync,
             ["yes"] = YesAsync,
             ["no"] = NoAsync,
             ["commands"] = CommandsAsync,
+            ["source"] = SourceAsync,
             ["timelimit"] = TimeLimitAsync,
             ["tl"] = TimeLimitAsync,
             ["preset"] = PresetAsync,
@@ -90,6 +99,24 @@ internal sealed partial class RandomizerGame
                 BronzeTime: (int)mapInfo["BronzeTime"]
             );
             currentMapTrackId = pendingMapTrackId;
+
+            playerCheckpointProgress.Clear();
+            currentMapCheckpointTotal = null;
+
+            try
+            {
+                var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+                currentMapCheckpointTotal = info.NbCheckpoints;
+
+                if (info.NbCheckpoints is { } total)
+                {
+                    await client.SendManialinkPageAsync(BuildCheckpointManialink(0, total), cancellationToken: cancellationToken);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: checkpoint HUD setup failed - {ex.Message}");
+            }
         });
 
         client.On("TrackMania.EndRace", async (methodParams, cancellationToken) =>
@@ -97,6 +124,34 @@ internal sealed partial class RandomizerGame
             currentMap = null;
             currentMapTrackId = null;
             randomEnqueuedMapFileName = null;
+            currentMapCheckpointTotal = null;
+            playerCheckpointProgress.Clear();
+            // not hiding the manialink here: SendHideManialinkPage has no per-widget id to target
+            // without also nuking the always-on top10 panel, and BeginRace overwrites the CP
+            // counter text for the next map anyway, so the stale text is only visible for a moment
+        });
+
+        client.On("TrackMania.PlayerCheckpoint", async (methodParams, cancellationToken) =>
+        {
+            var login = (string)methodParams[1];
+            var checkpointIndex = (int)methodParams[4];
+
+            if (currentMapCheckpointTotal is not { } total)
+            {
+                return;
+            }
+
+            var current = checkpointIndex + 1;
+            playerCheckpointProgress[login] = current;
+
+            try
+            {
+                await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(current, total), cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: failed to update checkpoint HUD for {login} - {ex.Message}");
+            }
         });
 
         client.On("TrackMania.PlayerConnect", async (methodParams, cancellationToken) =>
@@ -106,6 +161,19 @@ internal sealed partial class RandomizerGame
             nicknameCache[login] = await client.GetPlayerNicknameAsync(login, cancellationToken);
 
             await SendWelcomeMessageAsync(login, cancellationToken);
+            await SendTop10PanelAsync(cancellationToken);
+
+            if (currentMapCheckpointTotal is { } total)
+            {
+                try
+                {
+                    await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(0, total), cancellationToken: cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Warning: failed to show checkpoint HUD to {login} - {ex.Message}");
+                }
+            }
         });
 
         client.On("TrackMania.PlayerChat", async (methodParams, cancellationToken) =>
@@ -207,6 +275,10 @@ internal sealed partial class RandomizerGame
         RegisterCallbacks();
 
         await SendWelcomeMessageAsync(login: null, cancellationToken);
+        await SendTop10PanelAsync(cancellationToken);
+
+        Console.WriteLine("DEBUG cp manialink:\n" + BuildCheckpointManialink(3, 10));
+        Console.WriteLine("DEBUG top10 manialink:\n" + BuildTop10Manialink([new LeaderboardEntry("TestPlayer", 5)]));
 
         _ = StatusWriteLoopAsync(cancellationToken);
 
@@ -263,11 +335,14 @@ internal sealed partial class RandomizerGame
         }
 
         string? mapName = null;
-        if (randomEnqueuedMapFileName is not null)
+        int? nbCheckpoints = null;
+        if (currentMapTrackId is not null)
         {
             try
             {
-                mapName = TmFormatCodeRegex().Replace(await client.GetMapNameAsync(randomEnqueuedMapFileName, cancellationToken), string.Empty);
+                var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+                mapName = TmFormatCodeRegex().Replace(info.Name, string.Empty);
+                nbCheckpoints = info.NbCheckpoints;
             }
             catch (Exception)
             {
@@ -281,6 +356,7 @@ internal sealed partial class RandomizerGame
             SessionActive,
             PlayerCount = playerCount,
             CurrentMapName = mapName,
+            CurrentMapCheckpoints = nbCheckpoints,
             CurrentMapTrackId = currentMapTrackId,
             CurrentMapUrl = currentMapTrackId is { } id ? $"https://{tmxRules.GetSiteUrl()}/trackshow/{id}" : null,
             Top = leaderboard.GetTop(5),
@@ -458,7 +534,22 @@ internal sealed partial class RandomizerGame
         }
 
         var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
-        await SendMessageAsync(login, $"$FF0Current map: $FFF$l[{tmxUrl}]{tmxUrl}$l", cancellationToken);
+        var cpSuffix = string.Empty;
+
+        try
+        {
+            var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+            if (info.NbCheckpoints is { } cpCount)
+            {
+                cpSuffix = $" $FFF({cpCount} CPs)";
+            }
+        }
+        catch (Exception)
+        {
+            // checkpoint count not available, just skip the suffix
+        }
+
+        await SendMessageAsync(login, $"$FF0Current map:{cpSuffix} $FFF$l[{tmxUrl}]{tmxUrl}$l", cancellationToken);
     }
 
     private async Task InfoAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -473,8 +564,28 @@ internal sealed partial class RandomizerGame
             "$FF0/rank$FFF - show your own rank and finish count",
             "$FF0/votepreset <name>$FFF - propose switching preset, others confirm with $0F0/yes$FFF ($FF0/presets$FFF for names)",
             "$FF0/commands$FFF - list every raw command name",
+            "$FF0/source$FFF - get the source code link for this modified server (AGPLv3)",
             "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/timelimit$FFF",
         ], cancellationToken);
+    }
+
+    private async Task TestHudAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        const string testXml = """
+            <manialink version="1">
+                <label posn="0 0 5" halign="center" valign="center" textsize="3" textcolor="FFFF" text="TEST HUD WORKS"/>
+            </manialink>
+            """;
+
+        try
+        {
+            await client.SendManialinkPageToLoginAsync(login, testXml, cancellationToken: cancellationToken);
+            await SendMessageAsync(login, "$0F0Test HUD sent - do you see big text in the middle of your screen?", cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            await SendMessageAsync(login, $"$F00Failed to send: {ex.Message}", cancellationToken);
+        }
     }
 
     private async Task CommandsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -485,6 +596,11 @@ internal sealed partial class RandomizerGame
             .Order();
 
         await SendMessageAsync(login, $"Commands: {string.Join(", ", formattedCommands)}", cancellationToken);
+    }
+
+    private async Task SourceAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        await SendMessageAsync(login, $"$FF0This server runs a modified, AGPLv3-licensed version of Randomizer Anywhere. Source: $FFF$l[{SourceRepoUrl}]{SourceRepoUrl}$l", cancellationToken);
     }
 
     private async Task TimeLimitAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -808,6 +924,7 @@ internal sealed partial class RandomizerGame
             await SendFrozenTimeMessageAsync(cancellationToken);
 
             await leaderboard.RecordFinishAsync(login, GetPlainNickname(login), cancellationToken);
+            await SendTop10PanelAsync(cancellationToken);
             await SendReplayLinkAsync(login, cancellationToken);
             await Task.Delay(ReplaySaveGraceMs, cancellationToken);
 
@@ -878,8 +995,9 @@ internal sealed partial class RandomizerGame
                 await SendFrozenTimeMessageAsync(cancellationToken);
             }
 
-            var mapName = await client.GetMapNameAsync(randomEnqueuedMapFileName, cancellationToken);
-            await SendMessageAsync($"Next map is ready: {mapName}", cancellationToken);
+            var info = await client.GetChallengeInfoAsync(randomEnqueuedMapFileName, cancellationToken);
+            var cpSuffix = info.NbCheckpoints is { } cpCount ? $" ({cpCount} CPs)" : string.Empty;
+            await SendMessageAsync($"Next map is ready: {info.Name}{cpSuffix}", cancellationToken);
             await client.CallAsync("NextChallenge", [], cancellationToken);
         }
     }
@@ -939,6 +1057,50 @@ internal sealed partial class RandomizerGame
     private string GetNicknameOrLogin(string login)
     {
         return nicknameCache.TryGetValue(login, out var nickname) ? $"$<{nickname}$>" : login;
+    }
+
+    private async Task SendTop10PanelAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.SendManialinkPageAsync(BuildTop10Manialink(leaderboard.GetTop(10)), cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: failed to update top 10 panel - {ex.Message}");
+        }
+    }
+
+    private static string BuildCheckpointManialink(int current, int total) => $"""
+        <manialink id="cp_counter" version="1">
+            <quad posn="-62 42 4" sizen="26 8" halign="left" valign="center" bgcolor="000A"/>
+            <label posn="-60 40 5" halign="left" valign="center" textsize="2.5" textcolor="FFFF" text="CP {current} / {total}"/>
+        </manialink>
+        """;
+
+    private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top)
+    {
+        var rows = new System.Text.StringBuilder();
+        var y = 16;
+
+        rows.AppendLine("""<label posn="62 18 5" halign="right" valign="center" textsize="1.8" textcolor="FF0F" text="Top Finishers"/>""");
+
+        for (var i = 0; i < top.Count; i++)
+        {
+            var entry = top[i];
+            var text = System.Security.SecurityElement.Escape($"{i + 1}. {entry.LastNickname} - {entry.Finishes}");
+            y -= 4;
+            rows.AppendLine($"""<label posn="62 {y} 5" halign="right" valign="center" textsize="1.2" textcolor="FFFF" text="{text}"/>""");
+        }
+
+        var boxHeight = 10 + (top.Count * 4) + 4;
+
+        return $"""
+            <manialink id="top10_panel" version="1">
+                <quad posn="20 20 4" sizen="44 {boxHeight}" halign="left" valign="top" bgcolor="000A"/>
+                {rows}
+            </manialink>
+            """;
     }
 
     // plain-text nickname for destinations that don't understand TM's $-formatting codes (e.g. Discord)
