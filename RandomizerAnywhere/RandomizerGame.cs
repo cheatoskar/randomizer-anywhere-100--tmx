@@ -1,6 +1,7 @@
 ﻿using ManiaAPI.XmlRpc;
 using RandomizerAnywhere.Config;
 using System.Diagnostics;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using TmEssentials;
 
@@ -52,6 +53,8 @@ internal sealed partial class RandomizerGame
             ["imp"] = ImpossibleAsync,
             ["hard"] = HardAsync,
             ["top"] = TopAsync,
+            ["rank"] = RankAsync,
+            ["map"] = MapAsync,
             ["info"] = InfoAsync,
             ["votepreset"] = VotePresetAsync,
             ["yes"] = YesAsync,
@@ -205,6 +208,8 @@ internal sealed partial class RandomizerGame
 
         await SendWelcomeMessageAsync(login: null, cancellationToken);
 
+        _ = StatusWriteLoopAsync(cancellationToken);
+
         if (config.AutoStart)
         {
             // the server may still be finishing its own startup map load (ServerSetup's warmup
@@ -224,6 +229,67 @@ internal sealed partial class RandomizerGame
         }
 
         await client.WaitForCloseAsync(cancellationToken);
+    }
+
+    private static readonly string statusFilePath = Path.Combine(AppContext.BaseDirectory, "WebStatus", "status.json");
+
+    private async Task StatusWriteLoopAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            try
+            {
+                await WriteStatusAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: failed to write status.json - {ex.Message}");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+        }
+    }
+
+    private async Task WriteStatusAsync(CancellationToken cancellationToken)
+    {
+        var playerCount = 0;
+        try
+        {
+            playerCount = await client.GetPlayerCountAsync(cancellationToken);
+        }
+        catch (Exception)
+        {
+            // controller not fully connected yet, report 0 for now
+        }
+
+        string? mapName = null;
+        if (randomEnqueuedMapFileName is not null)
+        {
+            try
+            {
+                mapName = TmFormatCodeRegex().Replace(await client.GetMapNameAsync(randomEnqueuedMapFileName, cancellationToken), string.Empty);
+            }
+            catch (Exception)
+            {
+                // map info not available yet
+            }
+        }
+
+        var status = new
+        {
+            config.ServerName,
+            SessionActive,
+            PlayerCount = playerCount,
+            CurrentMapName = mapName,
+            CurrentMapTrackId = currentMapTrackId,
+            CurrentMapUrl = currentMapTrackId is { } id ? $"https://{tmxRules.GetSiteUrl()}/trackshow/{id}" : null,
+            Top = leaderboard.GetTop(5),
+            UpdatedAt = DateTimeOffset.UtcNow,
+        };
+
+        Directory.CreateDirectory(Path.GetDirectoryName(statusFilePath)!);
+        var json = JsonSerializer.Serialize(status);
+        await File.WriteAllTextAsync(statusFilePath, json, cancellationToken);
     }
 
     private async Task StartAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -370,14 +436,41 @@ internal sealed partial class RandomizerGame
         await SendMessageAsync(login, ["Top finishers on this server:", .. lines], cancellationToken);
     }
 
+    private async Task RankAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        var rank = leaderboard.GetRank(login);
+
+        if (rank is null)
+        {
+            await SendMessageAsync(login, "$F00You haven't finished a map on this server yet.", cancellationToken);
+            return;
+        }
+
+        await SendMessageAsync(login, $"$0F0You are rank $FF0#{rank.Value.Position}$0F0 with $FF0{rank.Value.Finishes}$0F0 finish(es).", cancellationToken);
+    }
+
+    private async Task MapAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (currentMapTrackId is not { } trackId)
+        {
+            await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
+            return;
+        }
+
+        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
+        await SendMessageAsync(login, $"$FF0Current map: $FFF$l[{tmxUrl}]{tmxUrl}$l", cancellationToken);
+    }
+
     private async Task InfoAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
         await SendMessageAsync(login, [
             "$0BF--- 100% TMX Project ---",
             "$FF0/skip$FFF - skip the current map (votes if multiple players are online)",
-            "$FF0/imp$FFF - mark the current map impossible, it will never be served again",
-            "$FF0/hard$FFF - flag the current map as hard for admin review (doesn't exclude it)",
+            "$FF0/map$FFF - show the current map's TMX link",
+            "$FF0/imp$FFF - report the current map as impossible for admin review",
+            "$FF0/hard$FFF - flag the current map as hard for admin review",
             "$FF0/top$FFF - show the top finishers on this server",
+            "$FF0/rank$FFF - show your own rank and finish count",
             "$FF0/votepreset <name>$FFF - propose switching preset, others confirm with $0F0/yes$FFF ($FF0/presets$FFF for names)",
             "$FF0/commands$FFF - list every raw command name",
             "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/timelimit$FFF",
@@ -714,7 +807,7 @@ internal sealed partial class RandomizerGame
             }
             await SendFrozenTimeMessageAsync(cancellationToken);
 
-            await leaderboard.RecordFinishAsync(login, GetNicknameOrLogin(login), cancellationToken);
+            await leaderboard.RecordFinishAsync(login, GetPlainNickname(login), cancellationToken);
             await SendReplayLinkAsync(login, cancellationToken);
             await Task.Delay(ReplaySaveGraceMs, cancellationToken);
 

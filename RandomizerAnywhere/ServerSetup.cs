@@ -272,6 +272,11 @@ internal sealed partial class ServerSetup
             "/verbose_rpc"
         };
 
+        if (!string.IsNullOrWhiteSpace(config.ServerComment))
+        {
+            args.Add($"/comment={config.ServerComment}");
+        }
+
         if (game == DedicatedServerType.TM)
         {
             var gameId = config.Game switch

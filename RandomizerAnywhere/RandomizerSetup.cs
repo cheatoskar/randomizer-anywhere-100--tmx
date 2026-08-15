@@ -12,7 +12,7 @@ internal sealed class RandomizerSetup
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
 
-    private readonly HashSet<string> commands = ["help", "commands", "info", "start", "skip", "imp", "hard", "top", "tmxquery", "timelimit", "tl", "stop", "preset", "presets", "votepreset", "yes", "no"];
+    private readonly HashSet<string> commands = ["help", "commands", "info", "start", "skip", "imp", "hard", "top", "rank", "map", "tmxquery", "timelimit", "tl", "stop", "preset", "presets", "votepreset", "yes", "no"];
 
     public RandomizerSetup(RemoteClient client, TmxRules tmxRules, AppConfig config)
     {

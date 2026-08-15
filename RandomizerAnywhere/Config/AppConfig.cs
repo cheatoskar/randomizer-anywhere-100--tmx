@@ -19,6 +19,7 @@ internal sealed class AppConfig
     public required bool CallVoteOnFinish { get; set; }
     public required string[] WelcomeMessage { get; set; }
     public required string ServerName { get; set; }
+    public required string ServerComment { get; init; }
     public required string GameSettings { get; init; }
     public bool SourceFromImpossibleList { get; set; }
     public required bool AutoStart { get; init; }

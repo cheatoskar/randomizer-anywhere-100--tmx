@@ -31,7 +31,8 @@ using var sigTermRegistration = PosixSignalRegistration.Create(PosixSignal.SIGTE
 var appConfig = provider.GetRequiredService<AppConfig>();
 if (appConfig.DedicatedServerMode)
 {
-    var replayServer = new ReplayServer(serverSetup.ReplaysDir, appConfig.ReplayServerPort);
+    var statusDir = Path.Combine(AppContext.BaseDirectory, "WebStatus");
+    var replayServer = new ReplayServer(serverSetup.ReplaysDir, statusDir, appConfig.ReplayServerPort);
     await replayServer.StartAsync();
 }
 
@@ -120,6 +121,7 @@ internal partial class AppServiceProvider
             CallVoteOnFinish = Configurator.GetBool(globalConfig.CallVoteOnFinish, cmdValue: null, "RANDANY_CALLVOTE_ON_FINISH"),
             WelcomeMessage = globalConfig.WelcomeMessage.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries),
             ServerName = Configurator.GetString(globalConfig.ServerName, cmdConfig.ServerName, "RANDANY_SERVER_NAME"),
+            ServerComment = Configurator.GetString(globalConfig.ServerComment, cmdValue: null, "RANDANY_SERVER_COMMENT"),
             GameSettings = Configurator.GetString(globalConfig.GameSettings, cmdValue: null, "RANDANY_GAMESETTINGS"),
             AutoStart = Configurator.GetBool(globalConfig.AutoStart, cmdValue: null, "RANDANY_AUTO_START"),
             AdminLogins = Configurator.GetString(globalConfig.AdminLogins, cmdValue: null, "RANDANY_ADMIN_LOGINS")

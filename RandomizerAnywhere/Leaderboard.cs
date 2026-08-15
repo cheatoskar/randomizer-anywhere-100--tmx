@@ -58,6 +58,20 @@ internal sealed class Leaderboard
         }
     }
 
+    public (int Position, int Finishes)? GetRank(string login)
+    {
+        lock (gate)
+        {
+            if (!entries.TryGetValue(login, out var entry))
+            {
+                return null;
+            }
+
+            var position = entries.Values.Count(e => e.Finishes > entry.Finishes) + 1;
+            return (position, entry.Finishes);
+        }
+    }
+
     private async Task SaveAsync(CancellationToken cancellationToken)
     {
         Dictionary<string, LeaderboardEntry> snapshot;
