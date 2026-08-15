@@ -1112,7 +1112,30 @@ internal sealed partial class RandomizerGame
         </manialink>
         """;
 
-    private const int Top10NicknameCharLimit = 20;
+    // a flat character count doesn't track rendered width - a lot of TMF nicknames lean on wide
+    // Unicode lookalike glyphs (Cyrillic/Greek/symbols) that render noticeably wider than plain
+    // ASCII in-game, so those need to cost more against the budget than a raw count would suggest
+    private const double Top10NicknameWidthBudget = 13.0;
+    private const double WideCharWidth = 1.8;
+
+    private static string TruncateForDisplayWidth(string plainNickname)
+    {
+        var width = 0.0;
+        var cut = plainNickname.Length;
+
+        for (var i = 0; i < plainNickname.Length; i++)
+        {
+            width += plainNickname[i] <= 0x7F ? 1.0 : WideCharWidth;
+
+            if (width > Top10NicknameWidthBudget)
+            {
+                cut = i;
+                break;
+            }
+        }
+
+        return cut == plainNickname.Length ? plainNickname : plainNickname[..cut] + "…";
+    }
 
     private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top)
     {
@@ -1125,13 +1148,14 @@ internal sealed partial class RandomizerGame
         {
             var entry = top[i];
 
-            // names within the limit keep their real in-game color; longer ones fall back to
+            // names within the width budget keep their real in-game color; longer ones fall back to
             // plain, truncated text - cutting a colored string could slice a $-code in half and
             // bleed its color into the rest of the panel. Reset with "$z" rather than wrapping in
             // "$<...$>" - TMF's manialink parser isn't standards-compliant XML, so a literal "<"/">"
             // here would get entity-escaped below and might not get decoded back by the game
-            var displayName = entry.LastNickname.Length > Top10NicknameCharLimit
-                ? entry.LastNickname[..Top10NicknameCharLimit] + "…"
+            var truncatedPlain = TruncateForDisplayWidth(entry.LastNickname);
+            var displayName = truncatedPlain.Length != entry.LastNickname.Length
+                ? truncatedPlain
                 : string.IsNullOrEmpty(entry.RawNickname) ? entry.LastNickname : entry.RawNickname;
 
             var text = System.Security.SecurityElement.Escape($"{i + 1}. {displayName} $z$FFF- {entry.Finishes}");
