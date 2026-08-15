@@ -1,19 +1,36 @@
-Game = ""
-TmxGame = ""
+Game = "TMNF"
+TmxGame = "TMNF"
 BindIP = ""
 XmlRpcPort = 5000
 AutoSkipMode = "AuthorMedal"
 TimeLimit = 3600000
 
-Preset = ""
+Preset = "100tmx_tmnf"
 
-ServerName = "Randomizer Anywhere"
+ServerName = "100% TMX Project"
 GameSettings = "MatchSettings/Randomizer.txt"
+
+# Start the RMC session automatically on server boot, no player needs to type /start
+AutoStart = true
+
+# Comma-separated TMF logins allowed to use /stop, /end, /start, /preset and /presets. Empty = anyone can use them.
+AdminLogins = ""
+
+# Port for the built-in HTTP server that hands players a download link to their own
+# server-validated replay (the only kind TMX accepts). Open this TCP port in your firewall.
+ReplayServerPort = 8090
+
+# Hostname/IP players can reach this machine on, used to build the replay download link.
+# Leave empty for local testing (falls back to localhost) - MUST be set to your public
+# IP/domain once this runs on Hetzner, otherwise players get an unreachable link.
+PublicHost = ""
+
+# LAN-only mode (local network discovery, no masterserver registration). true for local
+# testing, MUST be false for a real internet-facing Hetzner deployment.
+Lan = false
 
 WelcomeMessage = '''
 $FF0Welcome to $s$0BFRandomizer $FF8Anywhere$FF0!
-To pick a preset, see $FF0/presets
-Once you're ready, type $FF0/start
 To skip a map, type $FF0/skip
 '''
 
@@ -23,3 +40,4 @@ TM = "http://slig.free.fr/TM/dedicated/TmDedicatedServer_2006-05-30.zip"
 
 [TmxQuery]
 primarytype = 0
+inunlimiter = 0

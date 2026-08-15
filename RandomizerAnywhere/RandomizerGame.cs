@@ -8,9 +8,14 @@ namespace RandomizerAnywhere;
 
 internal sealed partial class RandomizerGame
 {
+    // give players time to manually save their replay (in-game "save replay" key) before
+    // the map gets forcefully switched away from under them
+    private const int ReplaySaveGraceMs = 8000;
+
     private readonly RemoteClient client;
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
+    private readonly ServerSetup serverSetup;
 
     private readonly Dictionary<string, Func<int, string, string[], CancellationToken, Task>> commandHandlers;
     private readonly Dictionary<string, string> nicknameCache = [];
@@ -22,11 +27,12 @@ internal sealed partial class RandomizerGame
 
     private bool SessionActive => sessionStopwatch is not null;
 
-    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config)
+    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, ServerSetup serverSetup)
     {
         this.client = client;
         this.tmxRules = tmxRules;
         this.config = config;
+        this.serverSetup = serverSetup;
 
         commandHandlers = new()
         {
@@ -79,10 +85,7 @@ internal sealed partial class RandomizerGame
 
             nicknameCache[login] = await client.GetPlayerNicknameAsync(login, cancellationToken);
 
-            if (!SessionActive)
-            {
-                await SendWelcomeMessageAsync(login, cancellationToken);
-            }
+            await SendWelcomeMessageAsync(login, cancellationToken);
         });
 
         client.On("TrackMania.PlayerChat", async (methodParams, cancellationToken) =>
@@ -185,10 +188,39 @@ internal sealed partial class RandomizerGame
 
         await SendWelcomeMessageAsync(login: null, cancellationToken);
 
+        if (config.AutoStart)
+        {
+            // the server may still be finishing its own startup map load (ServerSetup's warmup
+            // challenge), so an immediate map change here can race it and throw "Change in progress"
+            for (var attempt = 1; attempt <= 5; attempt++)
+            {
+                try
+                {
+                    await StartSessionAsync(cancellationToken);
+                    break;
+                }
+                catch (Exception) when (attempt < 5)
+                {
+                    await Task.Delay(2000, cancellationToken);
+                }
+            }
+        }
+
         await client.WaitForCloseAsync(cancellationToken);
     }
 
     private async Task StartAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        {
+            await SendMessageAsync(login, "$F00Only server admins can start a session.", cancellationToken);
+            return;
+        }
+
+        await StartSessionAsync(cancellationToken);
+    }
+
+    private async Task StartSessionAsync(CancellationToken cancellationToken)
     {
         if (!SessionActive)
         {
@@ -207,6 +239,12 @@ internal sealed partial class RandomizerGame
 
     private async Task StopAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
+        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        {
+            await SendMessageAsync(login, "$F00Only server admins can stop the session.", cancellationToken);
+            return;
+        }
+
         if (!SessionActive)
         {
             await SendMessageAsync(login, "$F00No active session to stop.", cancellationToken);
@@ -349,6 +387,12 @@ internal sealed partial class RandomizerGame
 
     private async Task PresetAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
+        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        {
+            await SendMessageAsync(login, "$F00Only server admins can change the preset.", cancellationToken);
+            return;
+        }
+
         if (args.Length == 0)
         {
             var currentPresetMessage = string.IsNullOrWhiteSpace(config.LastPreset?.DisplayName)
@@ -399,6 +443,12 @@ internal sealed partial class RandomizerGame
 
     private async Task PresetsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
+        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        {
+            await SendMessageAsync(login, "$F00Only server admins can view presets.", cancellationToken);
+            return;
+        }
+
         var presetsDir = Path.Combine(AppContext.BaseDirectory, "Presets");
 
         if (!Directory.Exists(presetsDir))
@@ -465,10 +515,42 @@ internal sealed partial class RandomizerGame
             }
             await SendFrozenTimeMessageAsync(cancellationToken);
 
-            await NextRandomMapAsync(goalReached: true, cancellationToken);
+            await SendReplayLinkAsync(login, cancellationToken);
+            await Task.Delay(ReplaySaveGraceMs, cancellationToken);
 
-            //var validationData = await client.CallAsync<byte[]>("GetValidationReplay", [login], cancellationToken);
+            await NextRandomMapAsync(goalReached: true, cancellationToken);
         }
+    }
+
+    private async Task SendReplayLinkAsync(string login, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var fileName = $"{SanitizeFileNamePart(login)}_{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.Replay.Gbx";
+            var relativeFileName = $"{config.ServerName}/{fileName}";
+
+            await client.CallAsync("SaveBestGhostsReplay", [login, relativeFileName], cancellationToken);
+
+            var host = string.IsNullOrWhiteSpace(config.PublicHost) ? "localhost" : config.PublicHost;
+            var url = $"http://{host}:{config.ReplayServerPort}/replays/{Uri.EscapeDataString(fileName)}";
+
+            await SendMessageAsync(login, $"$FF0Your TMX-valid replay: $FFF$l[{url}]{url}$l", cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            await SendMessageAsync(login, "$F00Could not fetch your replay from the server, try saving manually with the in-game key.", cancellationToken);
+            Console.WriteLine($"Warning: failed to send replay link to {login} - {ex.Message}");
+        }
+    }
+
+    private static string SanitizeFileNamePart(string value)
+    {
+        var buffer = new char[value.Length];
+        for (var i = 0; i < value.Length; i++)
+        {
+            buffer[i] = TmxRules.InvalidFileNameCharSearchValues.Contains(value[i]) ? '_' : value[i];
+        }
+        return new string(buffer);
     }
 
     public async Task NextRandomMapAsync(bool goalReached, CancellationToken cancellationToken)

@@ -6,3 +6,4 @@ AutoSkipMode = "None"
 
 [TmxQuery]
 inhasrecord = 0
+inunlimiter = 0

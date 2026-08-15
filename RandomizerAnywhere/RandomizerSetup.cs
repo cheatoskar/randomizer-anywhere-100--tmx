@@ -50,6 +50,7 @@ internal sealed class RandomizerSetup
 
         await client.Raw.CallAsync("SetTimeAttackLimit", [0], cancellationToken);
         await client.Raw.CallAsync("SetChatTime", [0], cancellationToken);
+        await client.Raw.CallAsync("AutoSaveValidationReplays", [true], cancellationToken);
 
         if (!config.DedicatedServerMode)
         {

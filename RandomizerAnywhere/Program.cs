@@ -10,6 +10,13 @@ var provider = new AppServiceProvider();
 var serverSetup = provider.GetRequiredService<ServerSetup>();
 await serverSetup.TrySetupAsync();
 
+var appConfig = provider.GetRequiredService<AppConfig>();
+if (appConfig.DedicatedServerMode)
+{
+    var replayServer = new ReplayServer(serverSetup.ReplaysDir, appConfig.ReplayServerPort);
+    await replayServer.StartAsync();
+}
+
 var randomizerSetup = provider.GetRequiredService<RandomizerSetup>();
 await randomizerSetup.RunAsync();
 
@@ -77,6 +84,13 @@ internal partial class AppServiceProvider
             WelcomeMessage = globalConfig.WelcomeMessage.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries),
             ServerName = Configurator.GetString(globalConfig.ServerName, cmdConfig.ServerName, "RANDANY_SERVER_NAME"),
             GameSettings = Configurator.GetString(globalConfig.GameSettings, cmdValue: null, "RANDANY_GAMESETTINGS"),
+            AutoStart = Configurator.GetBool(globalConfig.AutoStart, cmdValue: null, "RANDANY_AUTO_START"),
+            AdminLogins = Configurator.GetString(globalConfig.AdminLogins, cmdValue: null, "RANDANY_ADMIN_LOGINS")
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase),
+            PublicHost = Configurator.GetString(globalConfig.PublicHost, cmdValue: null, "RANDANY_PUBLIC_HOST"),
+            ReplayServerPort = Configurator.GetNumber(globalConfig.ReplayServerPort, cmdValue: null, "RANDANY_REPLAY_SERVER_PORT"),
+            Lan = Configurator.GetBool(globalConfig.Lan, cmdValue: null, "RANDANY_LAN"),
         };
 
         if (!string.IsNullOrWhiteSpace(globalConfig.Preset))

@@ -52,6 +52,8 @@ internal sealed partial class ServerSetup
         }
     }
 
+    public string ReplaysDir => Path.Combine(dedicatedServerDir, "GameData", "Tracks", "Replays", config.ServerName);
+
     public async Task<bool> TrySetupAsync(CancellationToken cancellationToken = default)
     {
         if (!config.DedicatedServerMode || config.SkipSetup)
@@ -150,6 +152,7 @@ internal sealed partial class ServerSetup
         }
 
         contents = XmlRpcPortRegex().Replace(contents, $"<xmlrpc_port>{config.XmlRpcPort}</xmlrpc_port>");
+        contents = ValidationSeedRegex().Replace(contents, "<use_changing_validation_seed>True</use_changing_validation_seed>");
 
         await File.WriteAllTextAsync(filePath, contents, cancellationToken);
     }
@@ -173,7 +176,7 @@ internal sealed partial class ServerSetup
         <chat_time>0</chat_time>
         <rounds_pointslimit>2</rounds_pointslimit>
         <rounds_usenewrules>1</rounds_usenewrules>
-        <timeattack_limit>0</timeattack_limit>
+        <timeattack_limit>600000</timeattack_limit>
         <timeattack_synchstartperiod>0</timeattack_synchstartperiod>
         <team_pointslimit>5</team_pointslimit>
         <team_maxpoints>6</team_maxpoints>
@@ -223,7 +226,7 @@ internal sealed partial class ServerSetup
 		<team_maxpoints>6</team_maxpoints>
 		<team_usenewrules>0</team_usenewrules>
 		<team_pointslimitnewrules>5</team_pointslimitnewrules>
-		<timeattack_limit>0</timeattack_limit>
+		<timeattack_limit>600000</timeattack_limit>
 		<timeattack_synchstartperiod>0</timeattack_synchstartperiod>
 		<laps_nblaps>5</laps_nblaps>
 		<laps_timelimit>0</laps_timelimit>
@@ -265,7 +268,7 @@ internal sealed partial class ServerSetup
         var args = new List<string>
         {
             $"/game_settings={config.GameSettings}",
-            "/servername=RandomizerAnywhere",
+            $"/servername={config.ServerName}",
             "/verbose_rpc"
         };
 
@@ -285,6 +288,10 @@ internal sealed partial class ServerSetup
         else
         {
             args.Add("/dedicated_cfg=dedicated_cfg.txt");
+        }
+
+        if (config.Lan)
+        {
             args.Add("/lan");
         }
 
@@ -405,4 +412,7 @@ internal sealed partial class ServerSetup
 
     [GeneratedRegex(@"<packmask>(.*?)<\/packmask>", RegexOptions.IgnoreCase)]
     private static partial Regex PackmaskRegex();
+
+    [GeneratedRegex(@"<use_changing_validation_seed>(.*?)<\/use_changing_validation_seed>", RegexOptions.IgnoreCase)]
+    private static partial Regex ValidationSeedRegex();
 }

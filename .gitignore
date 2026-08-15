@@ -363,3 +363,5 @@ MigrationBackup/
 FodyWeavers.xsd
 
 data/
+# Runtime-generated troubleshooting guide
+CANNOT_SEE_SERVER.txt

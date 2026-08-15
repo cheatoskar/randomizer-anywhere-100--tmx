@@ -20,5 +20,10 @@ internal sealed class AppConfig
     public required string[] WelcomeMessage { get; set; }
     public required string ServerName { get; set; }
     public required string GameSettings { get; init; }
+    public required bool AutoStart { get; init; }
+    public required IReadOnlySet<string> AdminLogins { get; init; }
+    public required string PublicHost { get; init; }
+    public required ushort ReplayServerPort { get; init; }
+    public required bool Lan { get; init; }
     public PresetConfig? LastPreset { get; set; }
 }

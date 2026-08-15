@@ -16,6 +16,13 @@ internal sealed class GlobalConfig
     public string ServerName { get; set; } = string.Empty;
     public string WelcomeMessage { get; set; } = string.Empty;
 
+    public bool AutoStart { get; set; }
+    public string AdminLogins { get; set; } = string.Empty;
+
+    public string PublicHost { get; set; } = string.Empty;
+    public ushort ReplayServerPort { get; set; }
+    public bool Lan { get; set; }
+
     public Dictionary<string, string> DownloadUrls { get; set; } = [];
     public Dictionary<string, object> TmxQuery { get; set; } = [];
 }
