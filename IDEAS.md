@@ -7,7 +7,7 @@ See the main [README](README.md) for full documentation. Short recap:
 - **Replay delivery workaround**: server saves the best ghost replay and hands out an HTTP
   download link in chat after a finish (backup currently).
 - **Leaderboard**: persistent finish counts, `/top`, `/rank`.
-- **Impossible/hard map reporting**: `/imp` (excludes + Discord alert), `/hard` (flags for review, no exclusion), backed by a shared Google Sheet refreshed periodically.
+- **Impossible/hard map reporting**: `/imp` (excludes for current session + Discord alert), `/hard` (flags for review, no exclusion), backed by a shared Google Sheet refreshed periodically.
 - **Curated genre presets** with instant admin switch (`/preset`) or player vote (`/votepreset`,
   `/yes`, `/no`) - Standard, Short & LOL, Lunatic, RPG, Fullspeed, Tech.
 - **`/rounds`**: switches the *current* map to Rounds mode if it's a real multilap challenge
@@ -33,6 +33,9 @@ Roughly in the order we'd prioritize them if we kept going:
 5. **Admin web panel** - start/stop/skip/preset from the status page instead of only chat
    commands, with basic auth.
 6. **Adding towards Unlimiter exclution**: Sometimes excluded maps still load up with missing blocks -> Vanilla players get kicked... a fix would be needed for that...
+7. Load up maps by ID (and voting) to play e.g. hard maps together
+6. Presets for specific upload-years.
+
 
 ## Technical findings (might save you time on the rewrite)
 

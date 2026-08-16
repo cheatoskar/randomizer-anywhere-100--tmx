@@ -20,6 +20,13 @@ internal sealed class TmxRules
     private readonly GameTitle game;
     private readonly Dictionary<int, DateTimeOffset> recentlyServed = [];
 
+    // maps reported via /imp - excluded for the rest of this process's uptime, not written to
+    // disk/the shared sheet. That's the human-reviewed permanent list (impossibleMaps above);
+    // this is just "don't show it again until someone actually reviews the report"
+    private readonly HashSet<int> sessionExcludedTrackIds = [];
+
+    public void ExcludeForSession(int trackId) => sessionExcludedTrackIds.Add(trackId);
+
     public TmxRules(HttpClient http, AppConfig config, ImpossibleMaps impossibleMaps)
     {
         this.http = http;
@@ -144,7 +151,7 @@ internal sealed class TmxRules
                 continue;
             }
 
-            if (!config.SourceFromImpossibleList && impossibleMaps.Contains(trackId))
+            if (!config.SourceFromImpossibleList && (impossibleMaps.Contains(trackId) || sessionExcludedTrackIds.Contains(trackId)))
             {
                 continue;
             }

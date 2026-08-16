@@ -629,7 +629,9 @@ internal sealed partial class RandomizerGame
 
         var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
 
-        await SendMessageAsync($"$F00Map {trackId} reported impossible by {GetNicknameOrLogin(login)} - pending review, skipping for now.", cancellationToken);
+        tmxRules.ExcludeForSession(trackId);
+
+        await SendMessageAsync($"$F00Map {trackId} reported impossible by {GetNicknameOrLogin(login)} - won't be shown again until reviewed, skipping.", cancellationToken);
         await discordNotifier.PostAsync($"**{GetPlainNickname(login)}** reported map **{trackId}** as impossible: {tmxUrl}", cancellationToken);
 
         await NextRandomMapAsync(goalReached: false, cancellationToken);
