@@ -32,9 +32,20 @@ internal sealed partial class RandomizerGame
     private MapInfo? currentMap;
     private int? currentMapTrackId;
     private int? pendingMapTrackId;
+
+    // most recent first: mapHistory[0] is "-1", mapHistory[1] is "-2", etc. Capped at
+    // MaxMapHistory so this can't grow unbounded over a long-running session.
+    private readonly List<int> mapHistory = [];
+    private const int MaxMapHistory = 10;
     private string? randomEnqueuedMapFileName;
 
+    // set by /loadmap or a passed /votemap vote, consumed (and cleared) by the next
+    // NextRandomMapAsync map fetch - lets that single method serve both "next random map" and
+    // "this specific TMX id" without duplicating the enqueue/insert/gamemode plumbing
+    private int? forcedNextMapTrackId;
+
     private string? votePresetName;
+    private int? voteMapTrackId;
     private HashSet<string>? voteYesLogins;
 
     // guards against concurrent map advances - with multiple players and AutoSkipMode=Finished,
@@ -72,6 +83,7 @@ internal sealed partial class RandomizerGame
             ["top"] = TopAsync,
             ["rank"] = RankAsync,
             ["map"] = MapAsync,
+            ["history"] = HistoryAsync,
             ["rounds"] = RoundsAsync,
             ["info"] = InfoAsync,
             ["testhud"] = TestHudAsync,
@@ -83,7 +95,9 @@ internal sealed partial class RandomizerGame
             ["timelimit"] = TimeLimitAsync,
             ["tl"] = TimeLimitAsync,
             ["preset"] = PresetAsync,
-            ["presets"] = PresetsAsync
+            ["presets"] = PresetsAsync,
+            ["loadmap"] = LoadMapAsync,
+            ["votemap"] = VoteMapAsync
         };
 
         /*client.Callback += async (methodName, methodParams, cancellationToken) =>
@@ -162,6 +176,18 @@ internal sealed partial class RandomizerGame
         {
             try
             {
+                // capture the outgoing map's id for "/map -1"/"-2"/... etc. BEFORE it gets cleared
+                // below - BeginRace can't do this itself since EndRace has already nulled
+                // currentMapTrackId by the time the next BeginRace fires
+                if (currentMapTrackId is { } endedTrackId)
+                {
+                    mapHistory.Insert(0, endedTrackId);
+                    if (mapHistory.Count > MaxMapHistory)
+                    {
+                        mapHistory.RemoveAt(mapHistory.Count - 1);
+                    }
+                }
+
                 currentMap = null;
                 currentMapTrackId = null;
                 randomEnqueuedMapFileName = null;
@@ -315,16 +341,23 @@ internal sealed partial class RandomizerGame
     private const int ActionVoteNo = 2;
     private const int ActionRoundsAccept = 3;
     private const int ActionClosePresetList = 4;
+    private const int ActionCloseHistory = 5;
     private const int ActionPresetBase = 10;
+    private const int ActionHistoryBase = 20;
 
     private const string RoundsPromptManialinkId = "rounds_prompt";
     private const string VotePopupManialinkId = "vote_popup";
     private const string PresetListManialinkId = "preset_list";
     private const string MapInfoManialinkId = "map_info";
+    private const string HistoryManialinkId = "history_list";
 
     // preset names as last shown to any player via the /presets widget, in click-index order -
     // clicking entry N in that widget re-runs it through the same path as /votepreset <name>
     private IReadOnlyList<string>? lastShownPresetNames;
+
+    // track ids as last shown to any player via the /history widget, in click-index order -
+    // clicking entry N in that widget re-runs it through the same path as "/map -<N+1>"
+    private IReadOnlyList<int>? lastShownHistoryTrackIds;
 
     private async Task HandleManialinkAnswerAsync(int playerUid, string login, int answer, CancellationToken cancellationToken)
     {
@@ -342,7 +375,21 @@ internal sealed partial class RandomizerGame
             case ActionClosePresetList:
                 await HideManialinkToLoginAsync(login, PresetListManialinkId, cancellationToken);
                 break;
+            case ActionCloseHistory:
+                await HideManialinkToLoginAsync(login, HistoryManialinkId, cancellationToken);
+                break;
             default:
+                if (answer >= ActionHistoryBase)
+                {
+                    var historyIndex = answer - ActionHistoryBase;
+                    if (lastShownHistoryTrackIds is { } trackIds && historyIndex >= 0 && historyIndex < trackIds.Count)
+                    {
+                        await MapAsync(playerUid, login, [$"-{historyIndex + 1}"], cancellationToken);
+                        await HideManialinkToLoginAsync(login, HistoryManialinkId, cancellationToken);
+                    }
+                    break;
+                }
+
                 var presetIndex = answer - ActionPresetBase;
                 if (presetIndex >= 0 && lastShownPresetNames is { } names && presetIndex < names.Count)
                 {
@@ -413,7 +460,14 @@ internal sealed partial class RandomizerGame
         if (config.AutoStart)
         {
             // the server may still be finishing its own startup map load (ServerSetup's warmup
-            // challenge), so an immediate map change here can race it and throw "Change in progress"
+            // challenge), so an immediate map change here can race it - and not always with just
+            // a catchable "Change in progress" RPC exception. Observed live: the race can instead
+            // crash the dedicated server process outright, which tears down the whole XML-RPC
+            // socket (unhandled IOException, no chance to retry). A short grace delay before the
+            // very first attempt avoids hitting that window in the first place; the retry loop
+            // below still exists for the milder, catchable case.
+            await Task.Delay(3000, cancellationToken);
+
             for (var attempt = 1; attempt <= 5; attempt++)
             {
                 try
@@ -616,39 +670,64 @@ internal sealed partial class RandomizerGame
         await NextRandomMapAsync(goalReached: false, cancellationToken);
     }
 
-    private async Task ImpossibleAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    // args[0] == "-N" (N >= 1) refers to the Nth map before the current one (e.g. "/imp -1" for
+    // the map that just ended, "/imp -3" for three maps ago - see /history for what's available).
+    // IsCurrent is false for any "-N" - callers use it to skip current-map-only side effects like
+    // advancing to a new map or reading live checkpoint info for a map that isn't loaded anymore
+    private (int? TrackId, bool IsCurrent) ResolveMapReference(string[] args)
     {
+        if (args.Length > 0 && int.TryParse(args[0], out var offset) && offset < 0)
+        {
+            var historyIndex = -offset - 1;
+            return (historyIndex < mapHistory.Count ? mapHistory[historyIndex] : null, false);
+        }
+
         // fall back to pendingMapTrackId - the map we most recently told the server to load - since
         // TrackMania.BeginRace (which confirms it into currentMapTrackId) can lag a few seconds
         // behind the actual challenge switch, and pendingMapTrackId never gets reset in the meantime
-        if ((currentMapTrackId ?? pendingMapTrackId) is not { } trackId)
+        return (currentMapTrackId ?? pendingMapTrackId, true);
+    }
+
+    private async Task ImpossibleAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        var (trackId, isCurrent) = ResolveMapReference(args);
+
+        if (trackId is not { } id)
         {
             await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
             return;
         }
 
-        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
+        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{id}";
 
-        tmxRules.ExcludeForSession(trackId);
+        tmxRules.ExcludeForSession(id);
 
-        await SendMessageAsync($"$F00Map {trackId} reported impossible by {GetNicknameOrLogin(login)} - won't be shown again until reviewed, skipping.", cancellationToken);
-        await discordNotifier.PostAsync($"**{GetPlainNickname(login)}** reported map **{trackId}** as impossible: {tmxUrl}", cancellationToken);
+        var skipSuffix = isCurrent ? ", skipping" : string.Empty;
+        await SendMessageAsync($"$F00Map {id} reported impossible by {GetNicknameOrLogin(login)} - won't be shown again until reviewed{skipSuffix}.", cancellationToken);
+        await discordNotifier.PostAsync($"**{GetPlainNickname(login)}** reported map **{id}** as impossible: {tmxUrl}", cancellationToken);
 
-        await NextRandomMapAsync(goalReached: false, cancellationToken);
+        // only advance the session if we're reporting the map that's actually loaded right now -
+        // "/imp -1" reports a map that's already gone, the current one has nothing to do with it
+        if (isCurrent)
+        {
+            await NextRandomMapAsync(goalReached: false, cancellationToken);
+        }
     }
 
     private async Task HardAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
-        if ((currentMapTrackId ?? pendingMapTrackId) is not { } trackId)
+        var (trackId, _) = ResolveMapReference(args);
+
+        if (trackId is not { } id)
         {
             await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
             return;
         }
 
-        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
+        var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{id}";
 
-        await SendMessageAsync($"$FF0Map {trackId} flagged as hard by {GetNicknameOrLogin(login)} for review.", cancellationToken);
-        await discordNotifier.PostHardAsync($"**{GetPlainNickname(login)}** flagged map **{trackId}** as hard: {tmxUrl}", cancellationToken);
+        await SendMessageAsync($"$FF0Map {id} flagged as hard by {GetNicknameOrLogin(login)} for review.", cancellationToken);
+        await discordNotifier.PostHardAsync($"**{GetPlainNickname(login)}** flagged map **{id}** as hard: {tmxUrl}", cancellationToken);
     }
 
     private async Task TopAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -680,35 +759,84 @@ internal sealed partial class RandomizerGame
 
     private async Task MapAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
-        if ((currentMapTrackId ?? pendingMapTrackId) is not { } trackId)
+        var (trackId, isCurrent) = ResolveMapReference(args);
+
+        if (trackId is not { } id)
         {
-            await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
+            var noMapMessage = isCurrent ? "$F00No map is currently loaded." : "$F00No previous map recorded yet.";
+            await SendMessageAsync(login, noMapMessage, cancellationToken);
             return;
         }
 
         // "http://" not "https://" - TMF's chat "$l[...]" link syntax prepends its own "http://"
         // on top of anything that isn't already that exact scheme, breaking the link (see /source)
-        var tmxUrl = $"http://{tmxRules.GetSiteUrl()}/trackshow/{trackId}";
+        var tmxUrl = $"http://{tmxRules.GetSiteUrl()}/trackshow/{id}";
         var cpSuffix = string.Empty;
 
-        try
+        // live checkpoint/lap info is only meaningful for the map that's actually loaded right
+        // now - GetCurrentChallengeInfo() always reflects the active challenge, which for "-1"
+        // would just be the WRONG map's info
+        if (isCurrent)
         {
-            var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
-            if (info.NbCheckpoints is { } cpCount)
+            try
             {
-                cpSuffix = $" $FFF({cpCount} CPs)";
+                var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+                if (info.NbCheckpoints is { } cpCount)
+                {
+                    cpSuffix = $" $FFF({cpCount} CPs)";
+                }
+                if (info.LapRace)
+                {
+                    cpSuffix += $" $F80[Multilap, {info.NbLaps} laps - $FFF/rounds$F80 for a valid replay]";
+                }
             }
-            if (info.LapRace)
+            catch (Exception)
             {
-                cpSuffix += $" $F80[Multilap, {info.NbLaps} laps - $FFF/rounds$F80 for a valid replay]";
+                // checkpoint count not available, just skip the suffix
             }
-        }
-        catch (Exception)
-        {
-            // checkpoint count not available, just skip the suffix
         }
 
-        await SendMessageAsync(login, $"$FF0Current map:{cpSuffix} $FFF$l[{tmxUrl}]{tmxUrl}$l", cancellationToken);
+        var label = isCurrent ? "Current map" : "Last map";
+        await SendMessageAsync(login, $"$FF0{label}:{cpSuffix} $FFF$l[{tmxUrl}]{tmxUrl}$l", cancellationToken);
+    }
+
+    // shows the last few maps so players know what "-2", "-3", ... refer to for /map, /imp, /hard
+    private const int HistoryDisplayCount = 5;
+
+    private async Task HistoryAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (mapHistory.Count == 0)
+        {
+            await SendMessageAsync(login, "$F00No map history yet.", cancellationToken);
+            return;
+        }
+
+        var lines = new List<string> { "$0BFRecent maps ($FF0/map -N$0BF, $FF0/imp -N$0BF, $FF0/hard -N$0BF):" };
+        var shownTrackIds = new List<int>();
+        var shownNames = new List<string>();
+
+        for (var i = 0; i < Math.Min(mapHistory.Count, HistoryDisplayCount); i++)
+        {
+            var trackId = mapHistory[i];
+            string name;
+            try
+            {
+                name = await tmxRules.GetTrackNameAsync(trackId, cancellationToken);
+            }
+            catch (Exception)
+            {
+                name = $"Track {trackId}";
+            }
+
+            lines.Add($"$FF0-{i + 1}$FFF: {name}");
+            shownTrackIds.Add(trackId);
+            shownNames.Add(name);
+        }
+
+        await SendMessageAsync(login, lines, cancellationToken);
+
+        lastShownHistoryTrackIds = shownTrackIds;
+        await client.SendManialinkPageToLoginAsync(login, BuildHistoryManialink(shownNames), cancellationToken: cancellationToken);
     }
 
     // switches the CURRENT map to Rounds mode so a multilap track can be finished properly - plain
@@ -754,16 +882,18 @@ internal sealed partial class RandomizerGame
         await SendMessageAsync(login, [
             "$0BF--- 100% TMX Project ---",
             "$FF0/skip$FFF - skip the current map (votes if multiple players are online)",
-            "$FF0/map$FFF - show the current map's TMX link",
+            "$FF0/map$FFF (or $FF0/map -1$FFF, $FF0-2$FFF, ... for a past map) - show the map's TMX link",
+            "$FF0/history$FFF - list recent maps and what $FF0-1$FFF, $FF0-2$FFF, ... refer to",
             "$FF0/rounds$FFF - switch a multilap map to Rounds mode for a valid replay",
-            "$FF0/imp$FFF - report the current map as impossible for admin review",
-            "$FF0/hard$FFF - flag the current map as hard for admin review",
+            "$FF0/imp$FFF (or $FF0/imp -1$FFF, $FF0-2$FFF, ... for a past map) - report a map as impossible",
+            "$FF0/hard$FFF (or $FF0/hard -1$FFF, $FF0-2$FFF, ... for a past map) - flag a map as hard for review",
             "$FF0/top$FFF - show the top finishers on this server",
             "$FF0/rank$FFF - show your own rank and finish count",
             "$FF0/votepreset <name>$FFF - propose switching preset, others confirm with $0F0/yes$FFF ($FF0/presets$FFF for names)",
+            "$FF0/votemap <TMX id>$FFF - propose loading a specific TMX map by id, shows name/author/difficulty/AT/tags, others confirm with $0F0/yes$FFF",
             "$FF0/commands$FFF - list every raw command name",
             "$FF0/source$FFF - get the source code link for this modified server (AGPLv3)",
-            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/timelimit$FFF",
+            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/loadmap <TMX id>$FFF, $FF0/timelimit$FFF",
         ], cancellationToken);
     }
 
@@ -954,9 +1084,9 @@ internal sealed partial class RandomizerGame
             return;
         }
 
-        if (votePresetName is not null)
+        if (votePresetName is not null || voteMapTrackId is not null)
         {
-            await SendMessageAsync(login, $"$F00A vote for '{votePresetName}' is already in progress.", cancellationToken);
+            await SendMessageAsync(login, $"$F00A vote for {DescribeActiveVote()} is already in progress.", cancellationToken);
             return;
         }
 
@@ -1013,9 +1143,9 @@ internal sealed partial class RandomizerGame
 
     private async Task YesAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
-        if (votePresetName is null || voteYesLogins is null)
+        if (voteYesLogins is null || (votePresetName is null && voteMapTrackId is null))
         {
-            await SendMessageAsync(login, "$F00No preset vote is currently active. Start one with $FF0/votepreset <name>$F00.", cancellationToken);
+            await SendMessageAsync(login, "$F00No vote is currently active. Start one with $FF0/votepreset <name>$F00 or $FF0/votemap <id>$F00.", cancellationToken);
             return;
         }
 
@@ -1023,15 +1153,22 @@ internal sealed partial class RandomizerGame
 
         if (await HasVoteMajorityAsync(cancellationToken))
         {
-            await FinalizeVoteAsync(cancellationToken);
+            if (votePresetName is not null)
+            {
+                await FinalizeVoteAsync(cancellationToken);
+            }
+            else
+            {
+                await FinalizeMapVoteAsync(cancellationToken);
+            }
         }
     }
 
     private async Task NoAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
-        if (votePresetName is null || voteYesLogins is null)
+        if (voteYesLogins is null || (votePresetName is null && voteMapTrackId is null))
         {
-            await SendMessageAsync(login, "$F00No preset vote is currently active.", cancellationToken);
+            await SendMessageAsync(login, "$F00No vote is currently active.", cancellationToken);
             return;
         }
 
@@ -1044,6 +1181,10 @@ internal sealed partial class RandomizerGame
         var playerCount = await client.GetPlayerCountAsync(cancellationToken);
         return voteYesLogins is not null && voteYesLogins.Count * 2 > playerCount;
     }
+
+    private string DescribeActiveVote() => votePresetName is not null
+        ? $"preset '{votePresetName}'"
+        : $"map {voteMapTrackId}";
 
     private async Task FinalizeVoteAsync(CancellationToken cancellationToken)
     {
@@ -1073,6 +1214,146 @@ internal sealed partial class RandomizerGame
 
         await SendMessageAsync($"$0F0Vote passed! Preset $FF0{displayName}$0F0 applied.", cancellationToken);
         await StartSessionAsync(cancellationToken);
+    }
+
+    // shared by /loadmap and a passed /votemap vote: queues the specific track id for the next
+    // map fetch, then either swaps it in right away (session already running, same path /skip
+    // uses) or starts a fresh session with it as the first map
+    private async Task LoadForcedMapAsync(int trackId, CancellationToken cancellationToken)
+    {
+        forcedNextMapTrackId = trackId;
+
+        try
+        {
+            if (SessionActive)
+            {
+                await NextRandomMapAsync(goalReached: false, cancellationToken);
+            }
+            else
+            {
+                await StartSessionAsync(cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            // the outer chat-command dispatch loop also catches exceptions, but only logs to the
+            // console - a failed /loadmap or /votemap should tell the player something went wrong
+            // instead of silently doing nothing
+            forcedNextMapTrackId = null;
+            await SendMessageAsync($"$F00Failed to load TMX map {trackId}: {ex.Message}", cancellationToken);
+        }
+    }
+
+    private async Task LoadMapAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        {
+            await SendMessageAsync(login, "$F00Only server admins can load a map directly. Try $FF0/votemap <id>$F00 instead.", cancellationToken);
+            return;
+        }
+
+        if (args.Length == 0 || !int.TryParse(args[0], out var trackId))
+        {
+            await SendMessageAsync(login, "Usage: $FF0/loadmap <TMX id>$FFF", cancellationToken);
+            return;
+        }
+
+        TmxRules.TrackDetails details;
+        try
+        {
+            details = await tmxRules.GetTrackDetailsAsync(trackId, cancellationToken);
+        }
+        catch (Exception)
+        {
+            await SendMessageAsync(login, $"$F00Could not find TMX track {trackId}.", cancellationToken);
+            return;
+        }
+
+        await SendMessageAsync($"$FF0{GetNicknameOrLogin(login)} is loading $0F0{details.Name}$FF0 (TMX {trackId})...", cancellationToken);
+        await LoadForcedMapAsync(trackId, cancellationToken);
+    }
+
+    private async Task VoteMapAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (args.Length == 0 || !int.TryParse(args[0], out var trackId))
+        {
+            await SendMessageAsync(login, "Usage: $FF0/votemap <TMX id>$FFF, then others type $FF0/yes$FFF to support.", cancellationToken);
+            return;
+        }
+
+        if (votePresetName is not null || voteMapTrackId is not null)
+        {
+            await SendMessageAsync(login, $"$F00A vote for {DescribeActiveVote()} is already in progress.", cancellationToken);
+            return;
+        }
+
+        TmxRules.TrackDetails details;
+        try
+        {
+            details = await tmxRules.GetTrackDetailsAsync(trackId, cancellationToken);
+        }
+        catch (Exception)
+        {
+            await SendMessageAsync(login, $"$F00Could not find TMX track {trackId}.", cancellationToken);
+            return;
+        }
+
+        voteMapTrackId = trackId;
+        voteYesLogins = [login];
+
+        var tagsSuffix = details.Tags.Count > 0 ? $" · {string.Join(", ", details.Tags)}" : string.Empty;
+        await SendMessageAsync($"$FF0{GetNicknameOrLogin(login)} started a vote to load $0F0{details.Name}$FF0 by {details.Author} ({details.DifficultyLabel}, AT {new TimeInt32(details.AuthorTimeMs)}{tagsSuffix}). Type $0F0/yes$FF0 to support ({PresetVoteWindowMs / 1000}s window).", cancellationToken);
+        await client.SendManialinkPageAsync(BuildMapVotePopupManialink(details), cancellationToken: cancellationToken);
+
+        if (await HasVoteMajorityAsync(cancellationToken))
+        {
+            await FinalizeMapVoteAsync(cancellationToken);
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(PresetVoteWindowMs, cancellationToken);
+
+                if (voteMapTrackId != trackId)
+                {
+                    return; // already finalized or superseded
+                }
+
+                if (await HasVoteMajorityAsync(cancellationToken))
+                {
+                    await FinalizeMapVoteAsync(cancellationToken);
+                }
+                else
+                {
+                    await SendMessageAsync($"$F00Vote to load map {trackId} failed - not enough support.", cancellationToken);
+                    voteMapTrackId = null;
+                    voteYesLogins = null;
+                    await HideManialinkAsync(VotePopupManialinkId, cancellationToken);
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or TaskCanceledException)
+            {
+                // server shutting down mid-vote, nothing to do
+            }
+        }, cancellationToken);
+    }
+
+    private async Task FinalizeMapVoteAsync(CancellationToken cancellationToken)
+    {
+        if (voteMapTrackId is not { } trackId)
+        {
+            return;
+        }
+
+        voteMapTrackId = null;
+        voteYesLogins = null;
+        await HideManialinkAsync(VotePopupManialinkId, cancellationToken);
+
+        await SendMessageAsync($"$0F0Vote passed! Loading TMX map {trackId}...", cancellationToken);
+        await LoadForcedMapAsync(trackId, cancellationToken);
     }
 
     private async Task PresetsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -1213,11 +1494,47 @@ internal sealed partial class RandomizerGame
 
             if (randomEnqueuedMapFileName is null)
             {
-                var nextMap = await tmxRules.NextMapGbxAsync(cancellationToken);
+                var nextMap = forcedNextMapTrackId is { } forcedTrackId
+                    ? await tmxRules.GetMapGbxByIdAsync(forcedTrackId, cancellationToken)
+                    : await tmxRules.NextMapGbxAsync(cancellationToken);
+                forcedNextMapTrackId = null;
 
-                var mapPath = Path.Combine("_RandomizerAny", nextMap.FileName);
-                await client.WriteFileAsync(mapPath, nextMap.Data, cancellationToken);
-                await client.CallAsync("InsertChallenge", [mapPath], cancellationToken);
+                // InsertChallenge de-dupes by the challenge's UID against the server's WHOLE selection
+                // (playlist), not by the file path we write it under - and that selection only ever
+                // grows, so once this exact TMX map was inserted before (an earlier random rotation, or
+                // a previous /loadmap or /votemap for the same id), it's stuck there for the rest of the
+                // server's uptime and every future InsertChallenge for it fails with "already added",
+                // no matter what's currently loaded. Reuse the existing selection entry instead of
+                // fighting that permanent case.
+                var mapPath = await client.FindSelectedChallengeFileNameAsync(nextMap.FileName, cancellationToken);
+
+                if (mapPath is null)
+                {
+                    mapPath = Path.Combine("_RandomizerAny", $"{DateTimeOffset.UtcNow.Ticks}_{nextMap.FileName}");
+                    await client.WriteFileAsync(mapPath, nextMap.Data, cancellationToken);
+
+                    // This retry loop is only for the TRANSIENT race: InsertChallenge called again
+                    // before the dedicated server has fully consumed the PREVIOUS insert (e.g. calling
+                    // /loadmap right after a /skip). Retrying after a short wait lets that prior
+                    // transition settle instead of pressing on with NextChallenge anyway, which would
+                    // just advance to whatever was already pending - silently loading the WRONG map
+                    // instead of the one just requested. The PERMANENT "already added" case (map
+                    // already in the selection) is handled above by reusing the existing entry, so it
+                    // never reaches this loop.
+                    for (var attempt = 1; attempt <= 5; attempt++)
+                    {
+                        try
+                        {
+                            await client.CallAsync("InsertChallenge", [mapPath], cancellationToken);
+                            break;
+                        }
+                        catch (Exception ex) when (ex.Message.Contains("already added", StringComparison.OrdinalIgnoreCase) && attempt < 5)
+                        {
+                            await Task.Delay(1000, cancellationToken);
+                        }
+                    }
+                }
+
                 await client.CallAsync("SetGameMode", [1], cancellationToken);
 
                 randomEnqueuedMapFileName = mapPath;
@@ -1237,9 +1554,21 @@ internal sealed partial class RandomizerGame
                     await SendFrozenTimeMessageAsync(cancellationToken);
                 }
 
-                var info = await client.GetChallengeInfoAsync(randomEnqueuedMapFileName, cancellationToken);
-                var cpSuffix = info.NbCheckpoints is { } cpCount ? $" ({cpCount} CPs)" : string.Empty;
-                await SendMessageAsync($"Next map is ready: {info.Name}{cpSuffix}", cancellationToken);
+                // best-effort preview message only - if the challenge got swallowed as an "already
+                // added" duplicate above, the server may not recognize THIS generated path even
+                // though the underlying map is still fine to switch to, so this must never block
+                // the actual NextChallenge call below
+                try
+                {
+                    var info = await client.GetChallengeInfoAsync(randomEnqueuedMapFileName, cancellationToken);
+                    var cpSuffix = info.NbCheckpoints is { } cpCount ? $" ({cpCount} CPs)" : string.Empty;
+                    await SendMessageAsync($"Next map is ready: {info.Name}{cpSuffix}", cancellationToken);
+                }
+                catch (Exception)
+                {
+                    await SendMessageAsync("Next map is ready.", cancellationToken);
+                }
+
                 await client.CallAsync("NextChallenge", [], cancellationToken);
             }
         }
@@ -1397,16 +1726,18 @@ internal sealed partial class RandomizerGame
         """;
 
     // sits just above the CP counter (which is anchored at y=37) so the two never overlap
+    private static string GetDifficultyColor(string difficultyLabel) => difficultyLabel switch
+    {
+        "Beginner" => "0F0",
+        "Intermediate" => "0AF",
+        "Expert" => "FA0",
+        "Lunatic" => "F0F",
+        _ => "FFF",
+    };
+
     private static string BuildMapInfoManialink(string difficultyLabel, int awards, int authorTimeMs)
     {
-        var difficultyColor = difficultyLabel switch
-        {
-            "Beginner" => "0F0",
-            "Intermediate" => "0AF",
-            "Expert" => "FA0",
-            "Lunatic" => "F0F",
-            _ => "FFF",
-        };
+        var difficultyColor = GetDifficultyColor(difficultyLabel);
 
         // "$o" for bold, then "$z$FFF" to fully reset before the awards count so the bold/color
         // doesn't bleed into it - same reset pattern as the top-10 panel, see its own note on why
@@ -1429,9 +1760,9 @@ internal sealed partial class RandomizerGame
     private static string BuildRoundsPromptManialink(int nbLaps) => $"""
         <manialink id="{RoundsPromptManialinkId}" version="1">
             <quad posn="-64 22 4" sizen="20 6.5" halign="left" valign="center" bgcolor="000A"/>
-            <label posn="-63 24.3 5" halign="left" valign="center" textsize="1.1" textcolor="FF8" text="Multilap map ({nbLaps} laps)"/>
-            <quad posn="-63 22.3 5" sizen="18 2.6" halign="left" valign="center" bgcolor="0B3A" action="{ActionRoundsAccept}"/>
-            <label posn="-62 22.3 6" halign="left" valign="center" textsize="1" textcolor="FFF" text="Click for Rounds mode"/>
+            <label posn="-63 24.1 5" halign="left" valign="center" textsize="1.1" textcolor="FF8" text="Multilap map ({nbLaps} laps)"/>
+            <quad posn="-63 21.4 5" sizen="18 2.6" halign="left" valign="center" bgcolor="0B3A" action="{ActionRoundsAccept}"/>
+            <label posn="-62 21.5 6" halign="left" valign="center" textsize="1" textcolor="FFF" text="Click for Rounds mode"/>
         </manialink>
         """;
 
@@ -1446,6 +1777,33 @@ internal sealed partial class RandomizerGame
                 <label posn="-15 40 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="YES"/>
                 <quad posn="15 40 5" sizen="12 3.5" halign="center" valign="center" bgcolor="B00A" action="{ActionVoteNo}"/>
                 <label posn="15 40 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="NO"/>
+            </manialink>
+            """;
+    }
+
+    // shares the same manialink id/YES-NO actions as BuildVotePopupManialink - only one vote (preset
+    // or map) can ever be active at a time (see the votePresetName/voteMapTrackId mutual-exclusion
+    // guards), so there's no risk of the two colliding on screen
+    private static string BuildMapVotePopupManialink(TmxRules.TrackDetails details)
+    {
+        var difficultyColor = GetDifficultyColor(details.DifficultyLabel);
+        var nameText = System.Security.SecurityElement.Escape(details.Name);
+        var authorText = System.Security.SecurityElement.Escape($"by {details.Author}");
+        var difficultyText = System.Security.SecurityElement.Escape($"{details.DifficultyLabel} · {details.Awards} award{(details.Awards == 1 ? "" : "s")}");
+        var tagsSummary = details.Tags.Count > 0 ? string.Join(", ", details.Tags) : "no tags";
+        var atTagsText = System.Security.SecurityElement.Escape($"AT {new TimeInt32(details.AuthorTimeMs)} · {tagsSummary}");
+
+        return $"""
+            <manialink id="{VotePopupManialinkId}" version="1">
+                <quad posn="-35 50 4" sizen="70 17" halign="left" valign="top" bgcolor="000C"/>
+                <label posn="0 47.5 5" halign="center" valign="center" textsize="1.6" textcolor="FF0F" text="$o{nameText}"/>
+                <label posn="0 44.8 5" halign="center" valign="center" textsize="1.1" textcolor="FFFF" text="{authorText}"/>
+                <label posn="0 42.3 5" halign="center" valign="center" textsize="1.1" textcolor="{difficultyColor}F" text="{difficultyText}"/>
+                <label posn="0 39.8 5" halign="center" valign="center" textsize="1.1" textcolor="0F0F" text="{atTagsText}"/>
+                <quad posn="-15 36 5" sizen="12 3.5" halign="center" valign="center" bgcolor="0B3A" action="{ActionVoteYes}"/>
+                <label posn="-15 36 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="YES"/>
+                <quad posn="15 36 5" sizen="12 3.5" halign="center" valign="center" bgcolor="B00A" action="{ActionVoteNo}"/>
+                <label posn="15 36 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="NO"/>
             </manialink>
             """;
     }
@@ -1482,16 +1840,47 @@ internal sealed partial class RandomizerGame
             """;
     }
 
+    private const double HistoryNameWidthBudget = 30.0;
+
+    private static string BuildHistoryManialink(IReadOnlyList<string> names)
+    {
+        static string Inv(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        var rows = new System.Text.StringBuilder();
+        var y = 18.0;
+
+        for (var i = 0; i < names.Count; i++)
+        {
+            var displayName = TruncateForDisplayWidth(names[i], HistoryNameWidthBudget);
+            var text = System.Security.SecurityElement.Escape($"-{i + 1}: {displayName}");
+            rows.AppendLine($"""<quad posn="-19 {Inv(y)} 5" sizen="38 3" halign="left" valign="center" bgcolor="0004" action="{ActionHistoryBase + i}"/>""");
+            rows.AppendLine($"""<label posn="0 {Inv(y)} 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="{text}"/>""");
+            y -= 3.5;
+        }
+
+        var boxHeight = 10 + (names.Count * 3.5);
+
+        return $"""
+            <manialink id="{HistoryManialinkId}" version="1">
+                <quad posn="-20 23 4" sizen="40 {Inv(boxHeight)}" halign="left" valign="top" bgcolor="000C"/>
+                <label posn="0 21.5 5" halign="center" valign="center" textsize="1.5" textcolor="FF0F" text="Click a map for its TMX link"/>
+                <quad posn="18.5 21.7 5" sizen="3 3" halign="center" valign="center" bgcolor="B00A" action="{ActionCloseHistory}"/>
+                <label posn="18.5 21.7 6" halign="center" valign="center" textsize="1.1" textcolor="FFF" text="X"/>
+                {rows}
+            </manialink>
+            """;
+    }
+
     // a flat character count doesn't track rendered width - a lot of TMF nicknames lean on wide
     // Unicode lookalike glyphs (Cyrillic/Greek/symbols) that render noticeably wider than plain
     // ASCII in-game, so those need to cost more against the budget than a raw count would suggest
-    private const double Top10NicknameWidthBudget = 13.0;
+    private const double Top10NicknameWidthBudget = 17.5;
     private const double WideCharWidth = 1.8;
 
     // truncates by visible width only - $-format codes are zero-width and are always consumed
     // whole (never split), so a truncated name keeps working, valid color codes instead of
     // falling back to plain text
-    private static string TruncateForDisplayWidth(string nickname)
+    private static string TruncateForDisplayWidth(string nickname, double widthBudget)
     {
         var width = 0.0;
         var i = 0;
@@ -1509,7 +1898,7 @@ internal sealed partial class RandomizerGame
             }
 
             var charWidth = nickname[i] <= 0x7F ? 1.0 : WideCharWidth;
-            if (width + charWidth > Top10NicknameWidthBudget)
+            if (width + charWidth > widthBudget)
             {
                 return nickname[..i] + "…";
             }
@@ -1521,12 +1910,25 @@ internal sealed partial class RandomizerGame
         return nickname;
     }
 
+    // gold/silver/bronze colors for the top 3 ranks - "$o" bolds, reset with "$z" before the name
+    // itself so a player's own raw nickname color (or the default white) takes back over
+    private static readonly string[] RankColors = ["FD0", "CCC", "C83"];
+
     private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top)
     {
+        // manialink coordinates must use "." as the decimal separator regardless of the host
+        // machine's locale - see the identical note on BuildPresetListManialink
+        static string Inv(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
         var rows = new System.Text.StringBuilder();
         var y = 16;
 
-        rows.AppendLine("""<label posn="62 18 5" halign="right" valign="center" textsize="1.9" textcolor="FF0F" text="$s$oTop Finishers"/>""");
+        // box is right-anchored at x=64 with this width, so its center (for the title) sits at
+        // 64 - width/2 - keep these two in sync if the width ever changes again
+        const double boxWidth = 17.0;
+        const double boxCenterX = 64.0 - (boxWidth / 2.0);
+
+        rows.AppendLine($"""<label posn="{Inv(boxCenterX)} 18 5" halign="center" valign="center" textsize="1.9" textcolor="FF0F" text="$s$oTop Finishers"/>""");
 
         for (var i = 0; i < top.Count; i++)
         {
@@ -1537,18 +1939,23 @@ internal sealed partial class RandomizerGame
             // manialink parser isn't standards-compliant XML, so a literal "<"/">" here would get
             // entity-escaped below and might not get decoded back by the game
             var source = string.IsNullOrEmpty(entry.RawNickname) ? entry.LastNickname : entry.RawNickname;
-            var displayName = TruncateForDisplayWidth(source);
+            var displayName = TruncateForDisplayWidth(source, Top10NicknameWidthBudget);
 
-            var text = System.Security.SecurityElement.Escape($"{i + 1}. {displayName} $z$FFF- {entry.Finishes}");
+            // name and score share ONE right-aligned label - splitting them into two independently
+            // anchored labels left a visible gap between a truncated "…" and the score whenever the
+            // name didn't reach its own anchor. A single label keeps them contiguous, and the score
+            // (as the last characters in the string) still lands exactly on the right anchor.
+            var rankPrefix = i < RankColors.Length ? $"$o${RankColors[i]}{i + 1}.$z" : $"{i + 1}.";
+            var text = System.Security.SecurityElement.Escape($"{rankPrefix} {displayName} $z$FFF- {entry.Finishes}");
             y -= 4;
-            rows.AppendLine($"""<label posn="62 {y} 5" halign="right" valign="center" textsize="1.2" textcolor="FFFF" text="{text}"/>""");
+            rows.AppendLine($"""<label posn="63.5 {y} 5" halign="right" valign="center" textsize="1.2" textcolor="FFF" text="{text}"/>""");
         }
 
-        var boxHeight = 10 + (top.Count * 4) + 4;
+        var boxHeight = 7 + (top.Count * 4);
 
         return $"""
             <manialink id="top10_panel" version="1">
-                <quad posn="64 20 4" sizen="14 {boxHeight}" halign="right" valign="top" bgcolor="000A"/>
+                <quad posn="64 20 4" sizen="{Inv(boxWidth)} {boxHeight}" halign="right" valign="top" bgcolor="000A"/>
                 {rows}
             </manialink>
             """;

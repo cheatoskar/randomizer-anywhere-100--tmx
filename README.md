@@ -32,7 +32,9 @@ This project was made to support the [100% TMX Project](https://discord.gg/HRShW
 - Persistent server-side leaderboard (`/top`, `/rank`)
 - Curated genre presets, switchable instantly by an admin or via player vote (`/preset`, `/votepreset`)
 - `/rounds` switches a genuinely multilap map to Rounds mode on demand, so a full-length finish produces a valid replay, then reverts to TimeAttack automatically on the next map
-- Clickable in-game manialink widgets: preset picker, Yes/No vote popup, a Rounds-mode prompt on multilap maps, and a live map-info panel (difficulty, TMX award count, author time)
+- Clickable in-game manialink widgets: preset picker, Yes/No vote popup, a Rounds-mode prompt on multilap maps, a live map-info panel (difficulty, TMX award count, author time), a map-history list (click a past map for its TMX link), and a gold/silver/bronze-highlighted top finishers panel
+- Map history: `/map`, `/imp`, and `/hard` accept `-1` through `-10` to reference a past map, not just the one that just ended; `/history` (chat + clickable widget) shows what each offset refers to
+- Load a specific TMX map by id (`/loadmap` admin-instant, `/votemap` player vote) - shows its name, author, difficulty, awards, author time, and style tags before it loads
 - Live auto-refreshing status webpage (current map + TMX preview image, active preset, who's racing and on which checkpoint, top finishers)
 - Clean shutdown on `systemctl stop`/`SIGTERM` - no orphaned dedicated server process, no crash dump
 
@@ -67,6 +69,7 @@ The following presets are bundled:
 | `rpg_tmnf` | RPG Together | RPG/Trial-tagged maps, Unlimiter blocks allowed |
 | `fullspeed_tmnf` | Fullspeed | Fullspeed-tagged maps |
 | `tech_tmnf` | Tech | Tech/SpeedTech-tagged maps |
+| `multilap_tmnf` | Multilap | Multilap-tagged maps (`/rounds` still needed per-map for a valid replay) |
 | `impossible_review_tmnf` | Impossible Review | Admin-only: cycles only through maps flagged via `/imp`, for manual review - no auto-skip |
 
 To create a new preset, add a `<name>.toml` file to the `Presets` folder (see `Presets/100tmx_tmnf.toml` for an example). TMX genre filters use the `tag` query parameter (the `Tags` array on a track, e.g. `tag = "6,1"` for LOL or Stunt) - not `primarytype`, which 404s on `/trackrandom` for any nonzero value despite being a documented field. See the comments in any bundled preset for the full list of known-good tag/difficulty values.
@@ -140,17 +143,20 @@ Beyond the game/server basics, `config.toml` (see `config.default.toml` for the 
 | `/start` | Starts a new randomizer session and queues the first random challenge. |
 | `/stop`, `/end` | Stops the active session and resets the current challenge. |
 | `/skip` | Skips the current challenge for a new random one. |
-| `/imp` | Marks the current challenge as impossible so it won't appear again, and reports it to Discord for review. |
-| `/hard` | Flags the current challenge as hard for review, without excluding it. Reports to Discord. |
+| `/imp` | Marks the current challenge as impossible so it won't appear again, and reports it to Discord for review. `/imp -1`, `/imp -2`, ... reports a past map instead (see `/history`). |
+| `/hard` | Flags the current challenge as hard for review, without excluding it. Reports to Discord. `/hard -1`, `/hard -2`, ... flags a past map instead. |
 | `/rounds` | Switches the current map to Rounds mode if it's a genuine multilap challenge, so a full finish produces a TMX-valid replay. Reverts to TimeAttack automatically once the map ends. |
 | `/top` | Shows the top finishers on this server. |
 | `/rank` | Shows your own rank and finish count. |
-| `/map` | Shows the current map's TMX link. |
+| `/map` | Shows the current map's TMX link. `/map -1`, `/map -2`, ... shows a past map (see `/history`). |
+| `/history` | Lists the last few maps and what `-1`, `-2`, ... refer to for `/map`, `/imp`, `/hard`. |
 | `/timelimit`, `/tl <seconds>` | Shows or sets the session time limit (only while no session is active). |
 | `/preset <name>` | Applies a bundled preset by name directly (admin only if `AdminLogins` is set; only while no session is active). |
 | `/presets` | Lists all available presets, and opens a clickable widget to vote for one. |
 | `/votepreset <name>` | Starts a vote to switch preset; other players support it with `/yes` (or the Yes/No widget) within the vote window. |
-| `/yes`, `/no` | Supports or withdraws support from an active preset vote. |
+| `/loadmap <TMX id>` | Loads a specific TMX map by id directly, no vote (admin only if `AdminLogins` is set). |
+| `/votemap <TMX id>` | Starts a vote to load a specific TMX map by id - shows its name, author, difficulty, awards, author time, and style tags in chat and a clickable widget; other players support it with `/yes` within the vote window. |
+| `/yes`, `/no` | Supports or withdraws support from an active preset or map vote. |
 | `/commands` | Lists every raw command name. |
 | `/info` | Shows a summary of what the server can do. |
 | `/source` | Links to the source code of this modified server (AGPLv3 compliance). |

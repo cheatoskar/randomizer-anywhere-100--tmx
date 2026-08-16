@@ -100,8 +100,84 @@ internal sealed class TmxRules
         return (difficultyLabel, result.Awards);
     }
 
+    public async Task<string> GetTrackNameAsync(int trackId, CancellationToken cancellationToken = default)
+    {
+        var url = $"https://{GetSiteUrl()}/api/tracks?id={trackId}&fields=TrackName";
+        using var response = await http.GetAsync(url, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var payload = await response.Content.ReadFromJsonAsync<TmxApiTracksResponse>(cancellationToken);
+        var name = payload?.Results?.FirstOrDefault()?.TrackName;
+
+        return string.IsNullOrWhiteSpace(name) ? $"Track {trackId}" : name;
+    }
+
     private sealed record TmxApiTracksResponse(List<TmxApiTrackResult>? Results);
-    private sealed record TmxApiTrackResult(int Difficulty, int Awards);
+    private sealed record TmxApiTrackResult(int Difficulty, int Awards, string? TrackName = null);
+
+    // tag id -> display name, verified live against tmnf.exchange/api/meta/tags (2026-08-16) -
+    // this is TMX's community "style" classification (LOL, Tech, RPG, ...), separate from the
+    // "Routes"/multilap axis used by the "routes" TmxQuery filter
+    private static readonly Dictionary<int, string> TagNames = new()
+    {
+        [0] = "Race", [1] = "Stunt", [2] = "Maze", [3] = "Offroad", [4] = "Multilap",
+        [5] = "FullSpeed", [6] = "LOL", [7] = "Tech", [8] = "SpeedTech", [9] = "RPG",
+        [10] = "PressForward", [11] = "Trial", [12] = "Grass", [13] = "Story",
+        [14] = "Nascar", [15] = "Speedfun", [16] = "Endurance", [17] = "Altered Nadeo",
+        [18] = "Transitional",
+    };
+
+    public sealed record TrackDetails(string Name, string Author, string DifficultyLabel, int Awards, int AuthorTimeMs, IReadOnlyList<string> Tags);
+
+    // richer metadata for a single specific track (name, author, difficulty, AT, style tags) -
+    // used to show what a player is voting to load, before it's ever downloaded/enqueued.
+    // "Uploader.Name" is TMX's nested-field syntax for the author's display name - "Username"/
+    // "Author"/etc all 400 with "field does not exist", verified live against the real API
+    public async Task<TrackDetails> GetTrackDetailsAsync(int trackId, CancellationToken cancellationToken = default)
+    {
+        var url = $"https://{GetSiteUrl()}/api/tracks?id={trackId}&fields=TrackName,Uploader.Name,Difficulty,Awards,AuthorTime,Tags";
+        using var response = await http.GetAsync(url, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var payload = await response.Content.ReadFromJsonAsync<TmxApiTrackDetailsResponse>(cancellationToken);
+        var result = payload?.Results?.FirstOrDefault();
+
+        if (result is null)
+        {
+            throw new InvalidOperationException($"TMX has no metadata for track {trackId}.");
+        }
+
+        var difficultyLabel = result.Difficulty >= 0 && result.Difficulty < DifficultyLabels.Length
+            ? DifficultyLabels[result.Difficulty]
+            : $"Difficulty {result.Difficulty}";
+
+        var tagNames = (result.Tags ?? []).Select(id => TagNames.GetValueOrDefault(id, $"Tag {id}")).ToList();
+        var authorName = result.Uploader?.Name is { Length: > 0 } uploaderName ? uploaderName : "unknown";
+        var trackName = result.TrackName is { Length: > 0 } name ? name : $"Track {trackId}";
+
+        return new TrackDetails(trackName, authorName, difficultyLabel, result.Awards, result.AuthorTime, tagNames);
+    }
+
+    private sealed record TmxApiTrackDetailsResponse(List<TmxApiTrackDetailsResult>? Results);
+    private sealed record TmxApiTrackDetailsResult(string? TrackName, TmxApiUploader? Uploader, int Difficulty, int Awards, int AuthorTime, List<int>? Tags);
+    private sealed record TmxApiUploader(string? Name);
+
+    // downloads a SPECIFIC track by id directly, bypassing /trackrandom entirely - unlike
+    // NextMapGbxAsync this does NOT check impossibleMaps/sessionExcludedTrackIds, since loading a
+    // known id is an explicit, deliberate request (e.g. "let's all try this hard map together"),
+    // not a random-pool pick that those exclusions are meant to filter
+    public async Task<InMemoryFile> GetMapGbxByIdAsync(int trackId, CancellationToken cancellationToken = default)
+    {
+        using var response = await http.GetAsync(GetTrackGbxUrl(trackId.ToString(CultureInfo.InvariantCulture)), cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var gbxBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        var fileName = response.Content.Headers.ContentDisposition?.FileNameStar
+            ?? response.Content.Headers.ContentDisposition?.FileName ?? (response.RequestMessage?.RequestUri?.Segments.Last() + ".Gbx");
+
+        recentlyServed[trackId] = DateTimeOffset.UtcNow;
+        return new InMemoryFile(GetValidFileName(fileName), gbxBytes, trackId);
+    }
 
     public string GetSiteUrl() => game switch
     {

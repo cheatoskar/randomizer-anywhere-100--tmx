@@ -9,13 +9,22 @@ See the main [README](README.md) for full documentation. Short recap:
 - **Leaderboard**: persistent finish counts, `/top`, `/rank`.
 - **Impossible/hard map reporting**: `/imp` (excludes for current session + Discord alert), `/hard` (flags for review, no exclusion), backed by a shared Google Sheet refreshed periodically.
 - **Curated genre presets** with instant admin switch (`/preset`) or player vote (`/votepreset`,
-  `/yes`, `/no`) - Standard, Short & LOL, Lunatic, RPG, Fullspeed, Tech.
+  `/yes`, `/no`) - Standard, Short & LOL, Lunatic, RPG, Fullspeed, Tech, Multilap.
 - **`/rounds`**: switches the *current* map to Rounds mode if it's a real multilap challenge
   (checked via the map's own `LapRace`/`NbLaps`, not TMX's community tag - see findings below),
   so a full finish produces a valid replay. Reverts to TimeAttack automatically on the next map.
 - **Clickable manialink widgets** via `TrackMania.PlayerManialinkPageAnswer`: Yes/No vote popup,
-  a clickable preset list, an auto-suggested Rounds-mode prompt on multilap maps, and a map-info
-  panel (difficulty color-coded, TMX award count, author time).
+  a clickable preset list, an auto-suggested Rounds-mode prompt on multilap maps, a map-info
+  panel (difficulty color-coded, TMX award count, author time), and a map-history list (click a
+  past map to get its TMX link, same as `/map -N`).
+- **Multi-map history**: `/map`, `/imp`, `/hard` accept `-1` through `-10` to reference any of the
+  last 10 maps, not just the one that just ended. `/history` (chat message + clickable widget)
+  lists the last 5 with their TMX names so players know what each offset points at.
+- **Load a specific TMX map by id**: `/loadmap <id>` (admin-instant) or `/votemap <id>` (player
+  vote, reuses the existing `/yes`/`/no` mechanism - only one preset or map vote can be active at
+  a time). Both fetch and show the map's name, author, difficulty, award count, author time, and
+  style tags (via TMX's `Uploader.Name` nested field and `Tags` array, resolved against the full
+  tag list from `/api/meta/tags`) before ever downloading/enqueuing the gbx.
 - **Live status webpage**: current map + TMX preview image, active preset, everyone racing with
   live checkpoint progress, top finishers.
 - **Clean shutdown** on `SIGTERM`/`systemctl stop` - no orphaned dedicated server process, no
@@ -33,14 +42,18 @@ Roughly in the order we'd prioritize them if we kept going:
 5. **Admin web panel** - start/stop/skip/preset from the status page instead of only chat
    commands, with basic auth.
 6. **Adding towards Unlimiter exclution**: Sometimes excluded maps still load up with missing blocks -> Vanilla players get kicked... a fix would be needed for that...
-7. Load up maps by ID (and voting) to play e.g. hard maps together
-6. Presets for specific upload-years.
-
+7. Presets for specific upload-years.
 
 ## Technical findings (might save you time on the rewrite)
 
 Things Claude hit and verified empirically against the live TMF dedicated server / TMX API, in case they're not already known:
 
+- **The track author's name is `Uploader.Name`, a nested field - not `Username`/`Author`/`AuthorLogin`/
+  etc, which all 400 with "field does not exist".** TMX's `fields` query param supports dot-path
+  nesting (`fields=Uploader.Name`) even though nothing in the swagger schema documents it. The full
+  tag id -> name mapping (used to resolve the `Tags` array field, e.g. `[1]` -> `["Stunt"]`) is at
+  `GET /api/meta/tags`, 19 entries as of 2026-08-16 (0=Race ... 18=Transitional) - small and stable
+  enough to hardcode rather than fetch on every lookup.
 - **TMX's `Routes` community tag (Multilap) often disagrees with the GBX's actual `LapRace`/
   `NbLaps` fields.** Tested 6 `Routes=1`-tagged tracks; all 6 came back `LapRace=false` in their
   real challenge info. The tag reflects level-design style (a physically looping route), not

@@ -1,0 +1,9 @@
+DisplayName = "Multilap"
+Games = ["TMNF", "TMUF"]
+
+TmxGame = "TMNF"
+AutoSkipMode = "Finished"
+
+[TmxQuery]
+tag = "4,14,16"
+inunlimiter = 0

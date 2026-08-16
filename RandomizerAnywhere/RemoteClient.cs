@@ -222,6 +222,20 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints, lapRace, nbLaps, authorTime, goldTime, silverTime, bronzeTime);
     }
 
+    // GetChallengeList returns every map currently in the server's selection (playlist) - the same
+    // list InsertChallenge checks a challenge's UID against before erroring "already added". That
+    // selection only ever grows (nothing in this app removes from it), so once a given TMX map has
+    // been inserted once, it stays there for the rest of the server's uptime. Used to detect that a
+    // map is already present so callers can reuse the existing entry instead of retrying InsertChallenge
+    // forever.
+    public async Task<string?> FindSelectedChallengeFileNameAsync(string fileNameSuffix, CancellationToken cancellationToken = default)
+    {
+        var list = await Raw.CallAsync<List<object>>("GetChallengeList", [1000, 0], cancellationToken);
+        return list.OfType<Dictionary<string, object>>()
+            .Select(c => c.TryGetValue("FileName", out var f) ? f as string : null)
+            .FirstOrDefault(f => f is not null && f.EndsWith(fileNameSuffix, StringComparison.OrdinalIgnoreCase));
+    }
+
     public void On(string methodName, Func<object[], CancellationToken, Task> handler)
     {
         Raw.On(methodName, handler);
