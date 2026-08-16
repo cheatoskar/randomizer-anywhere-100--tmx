@@ -5,6 +5,8 @@ TmxGame = "TMNF"
 AutoSkipMode = "Finished"
 
 [TmxQuery]
-difficulty = 4
+# 0=Beginner, 1=Intermediate, 2=Expert, 3=Lunatic - verified live against /trackrandom.
+# The old value of 4 doesn't exist and made this preset 404 on every single map fetch.
+difficulty = 3
 inunlimiter = 0
 routes = "0,2,3"

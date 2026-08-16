@@ -205,11 +205,6 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         await Raw.CallAsync("SendDisplayManialinkPageToLogin", [login, manialink, timeoutSeconds, hideOnClick], cancellationToken);
     }
 
-    public async Task HideManialinkPageByIdAsync(string id, CancellationToken cancellationToken = default)
-    {
-        await Raw.CallAsync("SendHideManialinkPageToId", [id], cancellationToken);
-    }
-
     public async Task HideAllManialinksAsync(CancellationToken cancellationToken = default)
     {
         await Raw.CallAsync("SendHideManialinkPage", [], cancellationToken);
@@ -220,7 +215,11 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         var nbCheckpoints = mapInfo.TryGetValue("NbCheckpoints", out var cp) && (int)cp >= 0 ? (int)cp : (int?)null;
         var lapRace = mapInfo.TryGetValue("LapRace", out var lr) && (bool)lr;
         var nbLaps = mapInfo.TryGetValue("NbLaps", out var nl) ? (int)nl : 0;
-        return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints, lapRace, nbLaps);
+        var authorTime = mapInfo.TryGetValue("AuthorTime", out var at) ? (int)at : 0;
+        var goldTime = mapInfo.TryGetValue("GoldTime", out var gt) ? (int)gt : 0;
+        var silverTime = mapInfo.TryGetValue("SilverTime", out var st) ? (int)st : 0;
+        var bronzeTime = mapInfo.TryGetValue("BronzeTime", out var bt) ? (int)bt : 0;
+        return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints, lapRace, nbLaps, authorTime, goldTime, silverTime, bronzeTime);
     }
 
     public void On(string methodName, Func<object[], CancellationToken, Task> handler)

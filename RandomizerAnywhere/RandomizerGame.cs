@@ -124,6 +124,30 @@ internal sealed partial class RandomizerGame
                 {
                     await client.SendManialinkPageAsync(BuildCheckpointManialink(0, total), cancellationToken: cancellationToken);
                 }
+
+                if (info.LapRace)
+                {
+                    await client.SendManialinkPageAsync(BuildRoundsPromptManialink(info.NbLaps), cancellationToken: cancellationToken);
+                }
+                else
+                {
+                    // clear a leftover prompt from a previous multilap map - a new one only gets
+                    // sent above when the CURRENT map is itself a multilap map
+                    await HideManialinkAsync(RoundsPromptManialinkId, cancellationToken);
+                }
+
+                if (currentMapTrackId is { } trackIdForMeta)
+                {
+                    try
+                    {
+                        var meta = await tmxRules.GetTrackMetaAsync(trackIdForMeta, cancellationToken);
+                        await client.SendManialinkPageAsync(BuildMapInfoManialink(meta.DifficultyLabel, meta.Awards, info.AuthorTime), cancellationToken: cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Warning: failed to fetch TMX map metadata - {ex.Message}");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -188,11 +212,7 @@ internal sealed partial class RandomizerGame
 
                 await SendWelcomeMessageAsync(login, cancellationToken);
                 await SendTop10PanelAsync(cancellationToken);
-
-                if (currentMapCheckpointTotal is { } total)
-                {
-                    await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(0, total), cancellationToken: cancellationToken);
-                }
+                await SendMapWidgetsToLoginAsync(login, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -272,6 +292,65 @@ internal sealed partial class RandomizerGame
                 Console.WriteLine($"Warning: EndRound handling failed - {ex.Message}");
             }
         });
+
+        client.On("TrackMania.PlayerManialinkPageAnswer", async (methodParams, cancellationToken) =>
+        {
+            try
+            {
+                var playerUid = (int)methodParams[0];
+                var login = (string)methodParams[1];
+                var answer = (int)methodParams[2];
+                await HandleManialinkAnswerAsync(playerUid, login, answer, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: manialink click handling failed - {ex.Message}");
+            }
+        });
+    }
+
+    // action IDs for clickable manialink widgets - sent back verbatim by the client as the
+    // "Answer" param of TrackMania.PlayerManialinkPageAnswer when a player clicks a button
+    private const int ActionVoteYes = 1;
+    private const int ActionVoteNo = 2;
+    private const int ActionRoundsAccept = 3;
+    private const int ActionClosePresetList = 4;
+    private const int ActionPresetBase = 10;
+
+    private const string RoundsPromptManialinkId = "rounds_prompt";
+    private const string VotePopupManialinkId = "vote_popup";
+    private const string PresetListManialinkId = "preset_list";
+    private const string MapInfoManialinkId = "map_info";
+
+    // preset names as last shown to any player via the /presets widget, in click-index order -
+    // clicking entry N in that widget re-runs it through the same path as /votepreset <name>
+    private IReadOnlyList<string>? lastShownPresetNames;
+
+    private async Task HandleManialinkAnswerAsync(int playerUid, string login, int answer, CancellationToken cancellationToken)
+    {
+        switch (answer)
+        {
+            case ActionVoteYes:
+                await YesAsync(playerUid, login, [], cancellationToken);
+                break;
+            case ActionVoteNo:
+                await NoAsync(playerUid, login, [], cancellationToken);
+                break;
+            case ActionRoundsAccept:
+                await RoundsAsync(playerUid, login, [], cancellationToken);
+                break;
+            case ActionClosePresetList:
+                await HideManialinkToLoginAsync(login, PresetListManialinkId, cancellationToken);
+                break;
+            default:
+                var presetIndex = answer - ActionPresetBase;
+                if (presetIndex >= 0 && lastShownPresetNames is { } names && presetIndex < names.Count)
+                {
+                    await VotePresetAsync(playerUid, login, [names[presetIndex]], cancellationToken);
+                    await HideManialinkToLoginAsync(login, PresetListManialinkId, cancellationToken);
+                }
+                break;
+        }
     }
 
     private async Task FinishMapAsync(CancellationToken cancellationToken)
@@ -892,6 +971,7 @@ internal sealed partial class RandomizerGame
         voteYesLogins = [login];
 
         await SendMessageAsync($"$FF0{GetNicknameOrLogin(login)} started a vote to switch to preset '{presetName}'. Type $0F0/yes$FF0 to support ({PresetVoteWindowMs / 1000}s window).", cancellationToken);
+        await client.SendManialinkPageAsync(BuildVotePopupManialink(presetName), cancellationToken: cancellationToken);
 
         if (await HasVoteMajorityAsync(cancellationToken))
         {
@@ -919,6 +999,7 @@ internal sealed partial class RandomizerGame
                     await SendMessageAsync($"$F00Vote for preset '{presetName}' failed - not enough support.", cancellationToken);
                     votePresetName = null;
                     voteYesLogins = null;
+                    await HideManialinkAsync(VotePopupManialinkId, cancellationToken);
                 }
             }
             catch (Exception ex) when (ex is OperationCanceledException or TaskCanceledException)
@@ -972,6 +1053,7 @@ internal sealed partial class RandomizerGame
         var presetName = votePresetName;
         votePresetName = null;
         voteYesLogins = null;
+        await HideManialinkAsync(VotePopupManialinkId, cancellationToken);
 
         // see ResetSessionStateForPresetSwitch for why this isn't StopSessionAsync
         if (SessionActive)
@@ -1001,18 +1083,24 @@ internal sealed partial class RandomizerGame
             return;
         }
 
-        var presetNames = Directory.EnumerateFiles(presetsDir, "*.toml")
-            .Select(path => $"$FF0{Path.GetFileNameWithoutExtension(path)}$FFF")
+        var rawPresetNames = Directory.EnumerateFiles(presetsDir, "*.toml")
+            .Select(Path.GetFileNameWithoutExtension)
+            .Where(name => !string.IsNullOrEmpty(name))
+            .Select(name => name!)
             .Order()
             .ToList();
 
-        if (presetNames.Count == 0)
+        if (rawPresetNames.Count == 0)
         {
             await SendMessageAsync(login, "$F00No presets available.", cancellationToken);
             return;
         }
 
-        await SendMessageAsync(login, [$"Presets: {string.Join(", ", presetNames)}", "Select a preset using $FF0/preset <name>$FFF"], cancellationToken);
+        var coloredNames = rawPresetNames.Select(name => $"$FF0{name}$FFF");
+        await SendMessageAsync(login, [$"Presets: {string.Join(", ", coloredNames)}", "Select a preset using $FF0/preset <name>$FFF, or click below to start a vote"], cancellationToken);
+
+        lastShownPresetNames = rawPresetNames;
+        await client.SendManialinkPageToLoginAsync(login, BuildPresetListManialink(rawPresetNames), cancellationToken: cancellationToken);
     }
 
     public async Task OnPlayerFinish(int playerUid, string login, int score, CancellationToken cancellationToken)
@@ -1021,6 +1109,11 @@ internal sealed partial class RandomizerGame
         {
             return;
         }
+
+        // see EnsureCurrentMapStateAsync's declaration - without this, a finish on a map that
+        // loaded before anyone connected silently did nothing at all (no leaderboard entry, no
+        // auto-skip, no replay link)
+        await EnsureCurrentMapStateAsync(cancellationToken);
 
         if (currentMap is null)
         {
@@ -1223,12 +1316,169 @@ internal sealed partial class RandomizerGame
         }
     }
 
+    // "SendHideManialinkPageToId" (RemoteClient used to have a wrapper for this) actually expects
+    // a numeric UId, not our string XML "id" attribute, and throws "Value of type STRING supplied
+    // where type INT was expected" - the real way to clear a specific id'd manialink is to send a
+    // new, empty <manialink> with that same id (documented TMF behavior: a previously displayed
+    // manialink with a matching id gets deleted when the replacement has no content)
+    private async Task HideManialinkAsync(string id, CancellationToken cancellationToken)
+    {
+        await client.SendManialinkPageAsync($"""<manialink id="{id}" version="1"></manialink>""", cancellationToken: cancellationToken);
+    }
+
+    // same empty-body-replace trick as HideManialinkAsync, but for a manialink that was only ever
+    // sent to one login (SendManialinkPageToLoginAsync) rather than broadcast to everyone
+    private async Task HideManialinkToLoginAsync(string login, string id, CancellationToken cancellationToken)
+    {
+        await client.SendManialinkPageToLoginAsync(login, $"""<manialink id="{id}" version="1"></manialink>""", cancellationToken: cancellationToken);
+    }
+
+    // BeginRace can fail to fire for a map that was already loaded before any player connected
+    // (confirmed live: no widgets appeared until the first skip/finish, and a finish on that
+    // first map didn't record or auto-skip at all) - this fills in currentMap/
+    // currentMapCheckpointTotal/currentMapTrackId on demand from the actually-running challenge,
+    // so OnPlayerFinish and the widget senders below never silently no-op because BeginRace never
+    // got the chance to populate them
+    private async Task<ChallengeSummary> EnsureCurrentMapStateAsync(CancellationToken cancellationToken)
+    {
+        var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+
+        currentMap ??= new MapInfo(
+            AuthorTime: info.AuthorTime,
+            GoldTime: info.GoldTime,
+            SilverTime: info.SilverTime,
+            BronzeTime: info.BronzeTime
+        );
+        currentMapCheckpointTotal ??= info.NbCheckpoints;
+        currentMapTrackId ??= pendingMapTrackId;
+
+        return info;
+    }
+
+    // sends the same set of map widgets BeginRace normally broadcasts to everyone, but to a
+    // single just-connected player - needed both for a genuinely late joiner and for the
+    // BeginRace-never-fired case EnsureCurrentMapStateAsync recovers from
+    private async Task SendMapWidgetsToLoginAsync(string login, CancellationToken cancellationToken)
+    {
+        var info = await EnsureCurrentMapStateAsync(cancellationToken);
+
+        if (currentMapCheckpointTotal is { } total)
+        {
+            var current = playerCheckpointProgress.GetValueOrDefault(login, 0);
+            await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(current, total), cancellationToken: cancellationToken);
+        }
+
+        if (info.LapRace)
+        {
+            await client.SendManialinkPageToLoginAsync(login, BuildRoundsPromptManialink(info.NbLaps), cancellationToken: cancellationToken);
+        }
+
+        if (currentMapTrackId is { } trackId)
+        {
+            try
+            {
+                var meta = await tmxRules.GetTrackMetaAsync(trackId, cancellationToken);
+                await client.SendManialinkPageToLoginAsync(login, BuildMapInfoManialink(meta.DifficultyLabel, meta.Awards, info.AuthorTime), cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: failed to fetch TMX map metadata for {login} - {ex.Message}");
+            }
+        }
+    }
+
     private static string BuildCheckpointManialink(int current, int total) => $"""
         <manialink id="cp_counter" version="1">
             <quad posn="-64 37 4" sizen="13 5" halign="left" valign="center" bgcolor="000A"/>
             <label posn="-63 37 5" halign="left" valign="center" textsize="2.5" textcolor="FFFF" text="CP {current} / {total}"/>
         </manialink>
         """;
+
+    // sits just above the CP counter (which is anchored at y=37) so the two never overlap
+    private static string BuildMapInfoManialink(string difficultyLabel, int awards, int authorTimeMs)
+    {
+        var difficultyColor = difficultyLabel switch
+        {
+            "Beginner" => "0F0",
+            "Intermediate" => "0AF",
+            "Expert" => "FA0",
+            "Lunatic" => "F0F",
+            _ => "FFF",
+        };
+
+        // "$o" for bold, then "$z$FFF" to fully reset before the awards count so the bold/color
+        // doesn't bleed into it - same reset pattern as the top-10 panel, see its own note on why
+        // "$<...$>" isn't used instead
+        var awardsSuffix = System.Security.SecurityElement.Escape($" · {awards} award{(awards == 1 ? "" : "s")}");
+        var difficultyText = System.Security.SecurityElement.Escape(difficultyLabel);
+        var authorTimeText = System.Security.SecurityElement.Escape($"AT {new TimeInt32(authorTimeMs)}");
+
+        return $"""
+            <manialink id="{MapInfoManialinkId}" version="1">
+                <quad posn="-64 43 4" sizen="20 7" halign="left" valign="center" bgcolor="000A"/>
+                <label posn="-63 45 5" halign="left" valign="center" textsize="1.3" textcolor="{difficultyColor}F" text="$o{difficultyText}$z$FFF{awardsSuffix}"/>
+                <label posn="-63 41.5 5" halign="left" valign="center" textsize="1.3" textcolor="0F0F" text="$o{authorTimeText}"/>
+            </manialink>
+            """;
+    }
+
+    // sits just below the CP counter - only sent while the loaded map is a real multilap
+    // challenge (see BeginRace), hidden again the moment a non-multilap map loads
+    private static string BuildRoundsPromptManialink(int nbLaps) => $"""
+        <manialink id="{RoundsPromptManialinkId}" version="1">
+            <quad posn="-64 22 4" sizen="20 6.5" halign="left" valign="center" bgcolor="000A"/>
+            <label posn="-63 24.3 5" halign="left" valign="center" textsize="1.1" textcolor="FF8" text="Multilap map ({nbLaps} laps)"/>
+            <quad posn="-63 22.3 5" sizen="18 2.6" halign="left" valign="center" bgcolor="0B3A" action="{ActionRoundsAccept}"/>
+            <label posn="-62 22.3 6" halign="left" valign="center" textsize="1" textcolor="FFF" text="Click for Rounds mode"/>
+        </manialink>
+        """;
+
+    private static string BuildVotePopupManialink(string presetName)
+    {
+        var text = System.Security.SecurityElement.Escape($"Switch preset to '{presetName}'?");
+        return $"""
+            <manialink id="{VotePopupManialinkId}" version="1">
+                <quad posn="-25 46 4" sizen="50 10" halign="left" valign="top" bgcolor="000C"/>
+                <label posn="0 44 5" halign="center" valign="center" textsize="1.5" textcolor="FF0F" text="{text}"/>
+                <quad posn="-15 40 5" sizen="12 3.5" halign="center" valign="center" bgcolor="0B3A" action="{ActionVoteYes}"/>
+                <label posn="-15 40 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="YES"/>
+                <quad posn="15 40 5" sizen="12 3.5" halign="center" valign="center" bgcolor="B00A" action="{ActionVoteNo}"/>
+                <label posn="15 40 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="NO"/>
+            </manialink>
+            """;
+    }
+
+    private static string BuildPresetListManialink(IReadOnlyList<string> presetNames)
+    {
+        // manialink coordinates must use "." as the decimal separator regardless of the host
+        // machine's locale - plain string interpolation of a double formats it with the CURRENT
+        // THREAD CULTURE, which on a German-locale box turns e.g. "18.5" into "18,5" and breaks
+        // the XML attribute (extra token where the parser expects exactly one number pair)
+        static string Inv(double value) => value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        var rows = new System.Text.StringBuilder();
+        var y = 18.0;
+
+        for (var i = 0; i < presetNames.Count; i++)
+        {
+            var text = System.Security.SecurityElement.Escape(presetNames[i]);
+            rows.AppendLine($"""<quad posn="-19 {Inv(y)} 5" sizen="38 3" halign="left" valign="center" bgcolor="0004" action="{ActionPresetBase + i}"/>""");
+            rows.AppendLine($"""<label posn="0 {Inv(y)} 6" halign="center" valign="center" textsize="1.2" textcolor="FFF" text="{text}"/>""");
+            y -= 3.5;
+        }
+
+        var boxHeight = 10 + (presetNames.Count * 3.5);
+
+        return $"""
+            <manialink id="{PresetListManialinkId}" version="1">
+                <quad posn="-20 23 4" sizen="40 {Inv(boxHeight)}" halign="left" valign="top" bgcolor="000C"/>
+                <label posn="0 21.5 5" halign="center" valign="center" textsize="1.5" textcolor="FF0F" text="Click to vote for a preset"/>
+                <quad posn="18.5 21.7 5" sizen="3 3" halign="center" valign="center" bgcolor="B00A" action="{ActionClosePresetList}"/>
+                <label posn="18.5 21.7 6" halign="center" valign="center" textsize="1.1" textcolor="FFF" text="X"/>
+                {rows}
+            </manialink>
+            """;
+    }
 
     // a flat character count doesn't track rendered width - a lot of TMF nicknames lean on wide
     // Unicode lookalike glyphs (Cyrillic/Greek/symbols) that render noticeably wider than plain

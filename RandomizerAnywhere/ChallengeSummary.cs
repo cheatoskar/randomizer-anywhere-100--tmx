@@ -1,3 +1,11 @@
 namespace RandomizerAnywhere;
 
-internal readonly record struct ChallengeSummary(string Name, int? NbCheckpoints, bool LapRace, int NbLaps);
+internal readonly record struct ChallengeSummary(
+    string Name,
+    int? NbCheckpoints,
+    bool LapRace,
+    int NbLaps,
+    int AuthorTime,
+    int GoldTime,
+    int SilverTime,
+    int BronzeTime);

@@ -1,6 +1,8 @@
 using RandomizerAnywhere.Config;
 using System.Buffers;
 using System.Globalization;
+using System.Linq;
+using System.Net.Http.Json;
 using System.Text;
 
 namespace RandomizerAnywhere;
@@ -65,6 +67,34 @@ internal sealed class TmxRules
 
     public string GetRandomTrackUrl() => $"https://{GetSiteUrl()}/trackrandom";
     public string GetTrackGbxUrl(string trackId) => $"https://{GetSiteUrl()}/trackgbx/{trackId}";
+
+    private static readonly string[] DifficultyLabels = ["Beginner", "Intermediate", "Expert", "Lunatic"];
+
+    // 0=Beginner, 1=Intermediate, 2=Expert, 3=Lunatic - verified live against the real API
+    // (tmnf.exchange/trackshow/<id> renders these exact labels for these exact values)
+    public async Task<(string DifficultyLabel, int Awards)> GetTrackMetaAsync(int trackId, CancellationToken cancellationToken = default)
+    {
+        var url = $"https://{GetSiteUrl()}/api/tracks?id={trackId}&fields=Difficulty,Awards";
+        using var response = await http.GetAsync(url, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var payload = await response.Content.ReadFromJsonAsync<TmxApiTracksResponse>(cancellationToken);
+        var result = payload?.Results?.FirstOrDefault();
+
+        if (result is null)
+        {
+            throw new InvalidOperationException($"TMX has no metadata for track {trackId}.");
+        }
+
+        var difficultyLabel = result.Difficulty >= 0 && result.Difficulty < DifficultyLabels.Length
+            ? DifficultyLabels[result.Difficulty]
+            : $"Difficulty {result.Difficulty}";
+
+        return (difficultyLabel, result.Awards);
+    }
+
+    private sealed record TmxApiTracksResponse(List<TmxApiTrackResult>? Results);
+    private sealed record TmxApiTrackResult(int Difficulty, int Awards);
 
     public string GetSiteUrl() => game switch
     {
