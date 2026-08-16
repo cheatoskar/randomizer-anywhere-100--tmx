@@ -218,7 +218,9 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
     private static ChallengeSummary ToChallengeSummary(Dictionary<string, object> mapInfo)
     {
         var nbCheckpoints = mapInfo.TryGetValue("NbCheckpoints", out var cp) && (int)cp >= 0 ? (int)cp : (int?)null;
-        return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints);
+        var lapRace = mapInfo.TryGetValue("LapRace", out var lr) && (bool)lr;
+        var nbLaps = mapInfo.TryGetValue("NbLaps", out var nl) ? (int)nl : 0;
+        return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints, lapRace, nbLaps);
     }
 
     public void On(string methodName, Func<object[], CancellationToken, Task> handler)

@@ -3,7 +3,7 @@ TmxGame = "TMNF"
 BindIP = ""
 XmlRpcPort = 5000
 AutoSkipMode = "AuthorMedal"
-TimeLimit = 3600000
+TimeLimit = 0
 
 Preset = "100tmx_tmnf"
 

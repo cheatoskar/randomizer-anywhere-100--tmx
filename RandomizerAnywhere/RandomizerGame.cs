@@ -72,6 +72,7 @@ internal sealed partial class RandomizerGame
             ["top"] = TopAsync,
             ["rank"] = RankAsync,
             ["map"] = MapAsync,
+            ["rounds"] = RoundsAsync,
             ["info"] = InfoAsync,
             ["testhud"] = TestHudAsync,
             ["votepreset"] = VotePresetAsync,
@@ -616,6 +617,10 @@ internal sealed partial class RandomizerGame
             {
                 cpSuffix = $" $FFF({cpCount} CPs)";
             }
+            if (info.LapRace)
+            {
+                cpSuffix += $" $F80[Multilap, {info.NbLaps} laps - $FFF/rounds$F80 for a valid replay]";
+            }
         }
         catch (Exception)
         {
@@ -625,12 +630,51 @@ internal sealed partial class RandomizerGame
         await SendMessageAsync(login, $"$FF0Current map:{cpSuffix} $FFF$l[{tmxUrl}]{tmxUrl}$l", cancellationToken);
     }
 
+    // switches the CURRENT map to Rounds mode so a multilap track can be finished properly - plain
+    // TimeAttack lets a player cross the finish line once and be done, ignoring the map's real lap
+    // count, which produces a replay TMX won't accept for a multilap track. Reverts to TimeAttack
+    // automatically the moment the RMC moves on to its next map - see NextRandomMapAsync's
+    // SetGameMode(1) call, which already runs unconditionally on every map fetch
+    private async Task RoundsAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (!SessionActive)
+        {
+            await SendMessageAsync(login, "$F00No session is active.", cancellationToken);
+            return;
+        }
+
+        ChallengeSummary info;
+        try
+        {
+            info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+        }
+        catch (Exception)
+        {
+            await SendMessageAsync(login, "$F00Could not read the current map's info - try again in a moment.", cancellationToken);
+            return;
+        }
+
+        if (!info.LapRace)
+        {
+            await SendMessageAsync(login, "$F00This map isn't a multilap track - no need for Rounds mode.", cancellationToken);
+            return;
+        }
+
+        await client.CallAsync("SetGameMode", [0], cancellationToken); // 0 = Rounds
+        await client.CallAsync("SetRoundForcedLaps", [0], cancellationToken); // 0 = use the map's own lap count
+        await client.CallAsync("ChallengeRestart", [], cancellationToken);
+
+        var lapsSuffix = info.NbLaps > 0 ? $" ({info.NbLaps} laps)" : string.Empty;
+        await SendMessageAsync($"$0F0{GetNicknameOrLogin(login)} switched this multilap map to Rounds mode{lapsSuffix} for a valid replay. Back to TimeAttack once this map ends.", cancellationToken);
+    }
+
     private async Task InfoAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
         await SendMessageAsync(login, [
             "$0BF--- 100% TMX Project ---",
             "$FF0/skip$FFF - skip the current map (votes if multiple players are online)",
             "$FF0/map$FFF - show the current map's TMX link",
+            "$FF0/rounds$FFF - switch a multilap map to Rounds mode for a valid replay",
             "$FF0/imp$FFF - report the current map as impossible for admin review",
             "$FF0/hard$FFF - flag the current map as hard for admin review",
             "$FF0/top$FFF - show the top finishers on this server",

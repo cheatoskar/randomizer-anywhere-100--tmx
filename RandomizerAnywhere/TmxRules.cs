@@ -153,7 +153,14 @@ internal sealed class TmxRules
 
         foreach (var c in fileName)
         {
-            buffer[bufferIndex++] = InvalidFileNameCharSearchValues.Contains(c) ? '_' : c;
+            // non-ASCII stays out too, not just the Windows-invalid characters: HttpClient parses
+            // the Content-Disposition "filename" header as Latin-1 per the historic HTTP header
+            // spec, so a map name with stylized Unicode (common on TMX) comes through as mojibake.
+            // That mojibake string then gets written to disk AND re-encoded as UTF-8 into the match
+            // settings XML separately, and the two don't round-trip to the same bytes - the
+            // dedicated server ends up looking for a filename slightly different from the one
+            // actually on disk and fails to boot with "Track unknown"
+            buffer[bufferIndex++] = InvalidFileNameCharSearchValues.Contains(c) || c > 127 ? '_' : c;
         }
 
         var result = new string(buffer, 0, bufferIndex);

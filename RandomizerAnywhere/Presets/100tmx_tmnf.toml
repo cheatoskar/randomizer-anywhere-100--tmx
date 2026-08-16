@@ -7,4 +7,8 @@ AutoSkipMode = "Finished"
 [TmxQuery]
 inhasrecord = 0
 inunlimiter = 0
-routes = "0,2,3"
+# no "routes" filter here on purpose: multilap is back in the pool now that /rounds lets players
+# switch a specific multilap map to Rounds mode for a valid replay (previously excluded because
+# TimeAttack replays on multilap tracks aren't accepted by TMX). Listing all 4 possible "routes"
+# values instead of omitting the filter (i.e. "routes=0,1,2,3") returns a 500 from TMX - verified
+# live, looks like a bug on their end when the filter covers every value
