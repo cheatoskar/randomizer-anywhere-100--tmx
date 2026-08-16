@@ -5,7 +5,7 @@
 See the main [README](README.md) for full documentation. Short recap:
 
 - **Replay delivery workaround**: server saves the best ghost replay and hands out an HTTP
-  download link in chat after a finish, since only server-saved replays validate on TMX.
+  download link in chat after a finish (backup currently).
 - **Leaderboard**: persistent finish counts, `/top`, `/rank`.
 - **Impossible/hard map reporting**: `/imp` (excludes + Discord alert), `/hard` (flags for review, no exclusion), backed by a shared Google Sheet refreshed periodically.
 - **Curated genre presets** with instant admin switch (`/preset`) or player vote (`/votepreset`,
