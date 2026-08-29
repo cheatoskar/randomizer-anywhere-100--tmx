@@ -365,3 +365,6 @@ FodyWeavers.xsd
 data/
 # Runtime-generated troubleshooting guide
 CANNOT_SEE_SERVER.txt
+
+# Local-only ops cheatsheet - contains the production host/access pattern, never commit
+DEPLOY_NOTES.md

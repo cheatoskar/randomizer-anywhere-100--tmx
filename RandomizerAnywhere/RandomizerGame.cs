@@ -1,4 +1,4 @@
-﻿using ManiaAPI.XmlRpc;
+using ManiaAPI.XmlRpc;
 using RandomizerAnywhere.Config;
 using System.Diagnostics;
 using System.Text.Json;
@@ -452,8 +452,23 @@ internal sealed partial class RandomizerGame
     {
         RegisterCallbacks();
 
-        await SendWelcomeMessageAsync(login: null, cancellationToken);
-        await SendTop10PanelAsync(cancellationToken);
+        try
+        {
+            await SendWelcomeMessageAsync(login: null, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: failed to send initial welcome message - {ex.Message}");
+        }
+
+        try
+        {
+            await SendTop10PanelAsync(cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: failed to update initial top 10 panel - {ex.Message}");
+        }
 
         _ = StatusWriteLoopAsync(cancellationToken);
 
@@ -475,8 +490,9 @@ internal sealed partial class RandomizerGame
                     await StartSessionAsync(cancellationToken);
                     break;
                 }
-                catch (Exception) when (attempt < 5)
+                catch (Exception ex) when (attempt < 5)
                 {
+                    Console.WriteLine($"Warning: StartSessionAsync attempt {attempt} failed - {ex.Message}");
                     await Task.Delay(2000, cancellationToken);
                 }
             }
@@ -1570,6 +1586,7 @@ internal sealed partial class RandomizerGame
                 }
 
                 await client.CallAsync("NextChallenge", [], cancellationToken);
+                await client.CallAsync("ChallengeRestart", [], cancellationToken);
             }
         }
         finally

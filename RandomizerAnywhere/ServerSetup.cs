@@ -1,4 +1,4 @@
-﻿using RandomizerAnywhere.Config;
+using RandomizerAnywhere.Config;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
@@ -265,16 +265,25 @@ internal sealed partial class ServerSetup
 
     private void StartServer(bool showServerWindow)
     {
-        var args = new List<string>
+        serverProcess = new Process
         {
-            $"/game_settings={config.GameSettings}",
-            $"/servername={config.ServerName}",
-            "/verbose_rpc"
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(dedicatedServerDir, dedicatedExeFileName),
+                WorkingDirectory = dedicatedServerDir,
+                UseShellExecute = false,
+                CreateNoWindow = !showServerWindow,
+                WindowStyle = showServerWindow ? ProcessWindowStyle.Normal : ProcessWindowStyle.Minimized, // ProcessWindowStyle.Hidden
+            }
         };
+
+        serverProcess.StartInfo.ArgumentList.Add($"/game_settings={config.GameSettings}");
+        serverProcess.StartInfo.ArgumentList.Add($"/servername={config.ServerName}");
+        serverProcess.StartInfo.ArgumentList.Add("/verbose_rpc");
 
         if (!string.IsNullOrWhiteSpace(config.ServerComment))
         {
-            args.Add($"/comment={config.ServerComment}");
+            serverProcess.StartInfo.ArgumentList.Add($"/comment={config.ServerComment}");
         }
 
         if (game == DedicatedServerType.TM)
@@ -287,36 +296,23 @@ internal sealed partial class ServerSetup
                 _ => throw new InvalidOperationException($"Unsupported game: {config.Game}")
             };
 
-            args.Add($"/game={gameId}");
-            args.Add("/dedicated_cfg=dedicated.cfg");
+            serverProcess.StartInfo.ArgumentList.Add($"/game={gameId}");
+            serverProcess.StartInfo.ArgumentList.Add("/dedicated_cfg=dedicated.cfg");
         }
         else
         {
-            args.Add("/dedicated_cfg=dedicated_cfg.txt");
+            serverProcess.StartInfo.ArgumentList.Add("/dedicated_cfg=dedicated_cfg.txt");
         }
 
         if (config.Lan)
         {
-            args.Add("/lan");
+            serverProcess.StartInfo.ArgumentList.Add("/lan");
         }
 
         if (config.BindIP is not null)
         {
-            args.Add($"/bindip={config.BindIP}");
+            serverProcess.StartInfo.ArgumentList.Add($"/bindip={config.BindIP}");
         }
-
-        serverProcess = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = Path.Combine(dedicatedServerDir, dedicatedExeFileName),
-                WorkingDirectory = dedicatedServerDir,
-                Arguments = string.Join(' ', args),
-                UseShellExecute = false,
-                CreateNoWindow = !showServerWindow,
-                WindowStyle = showServerWindow ? ProcessWindowStyle.Normal : ProcessWindowStyle.Minimized, // ProcessWindowStyle.Hidden
-            }
-        };
 
         serverProcess.Start();
     }
