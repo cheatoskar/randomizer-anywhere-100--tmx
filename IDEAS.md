@@ -29,12 +29,14 @@ See the main [README](README.md) for full documentation. Short recap:
   live checkpoint progress, top finishers.
 - **Clean shutdown** on `SIGTERM`/`systemctl stop` - no orphaned dedicated server process, no
   core dump.
-  - **Excluding Unlimiter maps** Otherwise the server will be unaccessible for Vanilla Players.
+  - **Excluding Unlimiter maps** Otherwise the server will be unaccessible for Vanilla Players if an unlimiter map loads.
 
 ## Ideas I didn't build (yet)
 
 Roughly in the order we'd prioritize them if we kept going:
 
+
+0. BINGO-Mode with unbeaten maps/ATs (idea by exix77)
 1. **Session Tracking** - For time in a session, time till session ends etc.
 2. **Rate limiting on `/imp`/`/hard`** - currently unlimited per player, could be griefed against good maps.
 3. **TMX outage fallback** - if tm-exchange.com is down, fall back to a small locally cached pool of last-known-good maps instead of hard-failing the fetch.
@@ -43,6 +45,7 @@ Roughly in the order we'd prioritize them if we kept going:
    commands, with basic auth.
 6. **Adding towards Unlimiter exclution**: Sometimes excluded maps still load up with missing blocks -> Vanilla players get kicked... a fix would be needed for that...
 7. Presets for specific upload-years.
+
 
 ## Technical findings (might save you time on the rewrite)
 
