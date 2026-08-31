@@ -68,7 +68,7 @@ Things Claude hit and verified empirically against the live TMF dedicated server
 - **Manialink coordinates in TMF are roughly ±60-64 (X) / ±40-48 (Y)**, not ManiaPlanet's wider
   range - values outside that render off-screen with no error. Use `posn`/`sizen`, not `pos`/
   `size`. `textcolor`/`bgcolor` take 4-hex RGBA-ish values.
-- **`SendHideManialinkPageToId` expects an int UId, not the string `id` you set in your XML** -
+- **`SendHideManialinkPageToId` expects an int UId, not the string `id` ** -
   passing a string throws `Value of type STRING supplied where type INT was expected`. To hide a
   specific manialink by its own `id`, send a replacement `<manialink id="...">` with an empty
   body instead (documented behavior: a previously displayed manialink with a matching id gets
