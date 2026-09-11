@@ -236,9 +236,64 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             .FirstOrDefault(f => f is not null && f.EndsWith(fileNameSuffix, StringComparison.OrdinalIgnoreCase));
     }
 
+    // Every handler ever registered, so a reconnect can re-attach them to the new connection.
+    // Raw.On binds to one XmlRpcClient instance; without this registry a reconnect would come
+    // back silently deaf - connected, authenticated, and handling nothing.
+    private readonly List<(string Method, Func<object[], CancellationToken, Task> Handler)> callbackHandlers = [];
+
+    // A stalled callback stream is otherwise invisible: requests keep working, the socket stays
+    // open, nothing throws. These two are the only direct evidence that callbacks are flowing.
+    public long CallbacksReceived { get; private set; }
+
+    public DateTimeOffset LastCallbackAt { get; private set; } = DateTimeOffset.UtcNow;
+
     public void On(string methodName, Func<object[], CancellationToken, Task> handler)
     {
-        Raw.On(methodName, handler);
+        callbackHandlers.Add((methodName, handler));
+        Attach(methodName, handler);
+    }
+
+    private void Attach(string methodName, Func<object[], CancellationToken, Task> handler)
+    {
+        Raw.On(methodName, async (parameters, cancellationToken) =>
+        {
+            CallbacksReceived++;
+            LastCallbackAt = DateTimeOffset.UtcNow;
+            await handler(parameters, cancellationToken);
+        });
+    }
+
+    // Rebuilds the connection in place, keeping the process - and everyone racing on it - alive.
+    // The failure this exists for leaves the socket healthy and request/response working while
+    // callbacks quietly stop, so redialling is the only way back. It costs seconds, where the
+    // alternative was waiting for an empty server and restarting.
+    public async Task ReconnectAsync(CancellationToken cancellationToken = default)
+    {
+        var previous = raw;
+        raw = null;
+
+        if (previous is not null)
+        {
+            try
+            {
+                await previous.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: disposing the stalled connection failed - {ex.Message}");
+            }
+        }
+
+        await ConnectAsync(cancellationToken);
+        await AuthenticateAsync(cancellationToken);
+        await EnableCallbacksAsync(cancellationToken);
+
+        foreach (var (method, handler) in callbackHandlers)
+        {
+            Attach(method, handler);
+        }
+
+        LastCallbackAt = DateTimeOffset.UtcNow;
     }
 
     public async ValueTask DisposeAsync()

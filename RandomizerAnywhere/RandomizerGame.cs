@@ -54,13 +54,80 @@ internal sealed partial class RandomizerGame
     // "fetch a new map" step (one is already queued) but still send a second NextChallenge,
     // advancing the dedicated server one extra map past what pendingMapTrackId/currentMapTrackId
     // account for - which is exactly what made /map, /imp and /hard report the previous map
-    private bool isAdvancingToNextMap;
+    private DateTimeOffset? advanceStartedAt;
+
+    // An advance still "in flight" after this long is treated as dead rather than blocking
+    // every future one. Without it a single hung RPC latched the guard permanently and
+    // /skip, /votemap and the finish-advance all became silent no-ops until a restart.
+    private static readonly TimeSpan AdvanceStallTimeout = TimeSpan.FromSeconds(30);
+
+    private bool isAdvancingToNextMap =>
+        advanceStartedAt is { } startedAt && DateTimeOffset.UtcNow - startedAt < AdvanceStallTimeout;
 
     private int? currentMapCheckpointTotal;
     private readonly Dictionary<string, int> playerCheckpointProgress = [];
     // tie-breaks the live "who's leading" ranking on the status page: same checkpoint count ->
     // whoever reached it first is ahead
     private readonly Dictionary<string, DateTimeOffset> playerCheckpointTimestamp = [];
+
+    // Set every time a map actually begins; the stalled-map watchdog measures from here.
+    private DateTimeOffset? currentMapStartedAt;
+    // Last player count observed by the status writer, reused by the watchdog so it
+    // does not make its own server call every 10 seconds.
+    private int lastOnlinePlayerCount;
+
+    // How long BeginRace is allowed to lag behind a map change the status poll already saw.
+    // A healthy callback arrives within a second or two; this is deliberately generous.
+    private static readonly TimeSpan CallbackGracePeriod = TimeSpan.FromSeconds(120);
+
+    private string? lastPolledMapName;
+    private DateTimeOffset lastPolledMapChangedAt = DateTimeOffset.UtcNow;
+    private bool callbackLossReported;
+
+    // Reconnecting deliberately closes the old connection, which WaitForCloseAsync cannot tell
+    // apart from the game server going away. The generation counter lets the keep-alive loop
+    // distinguish the two, so healing the stream never exits the controller by accident.
+    private volatile bool reconnectInProgress;
+    private int reconnectGeneration;
+    private DateTimeOffset lastCallbackRecoveryAt = DateTimeOffset.MinValue;
+    private int failedRecoveries;
+    private DateTimeOffset lastCallbackProbeAt = DateTimeOffset.MinValue;
+
+    private static readonly TimeSpan CallbackRecoveryCooldown = TimeSpan.FromMinutes(2);
+    // 20 minutes, not 5. The probe only matters on an empty server, where a stalled stream
+    // harms nobody until someone joins - and the first map change after that detects it
+    // within CallbackGracePeriod anyway. Probing often bought nothing and cost real churn.
+    private static readonly TimeSpan CallbackProbeIdle = TimeSpan.FromMinutes(20);
+
+    // A ChallengeRestart landing while the dedicated server is still switching maps cancels
+    // that switch and reloads the old map. Never probe near a map change.
+    private static readonly TimeSpan CallbackProbeMapSettleTime = TimeSpan.FromMinutes(2);
+
+    // The status loop polls the dedicated server directly; currentMapStartedAt is only ever set
+    // by the BeginRace callback. So if the poll sees a new map and BeginRace never follows, the
+    // callback stream is dead - and that failure is silent and nasty: the controller keeps
+    // answering its own polls (status.json stays fresh, the website looks healthy) while it has
+    // stopped driving the game entirely. No chat commands, no widgets, no welcome messages and
+    // no map picks, so the dedicated server just rotates the playlist it has already
+    // accumulated, which is what players see as "the track pool repeats and never adds maps".
+    // Observed on 2026-09-02 13:00-19:00 and again 2026-09-03 from 12:05.
+    private bool CallbacksHealthy
+    {
+        get
+        {
+            if (currentMapStartedAt is not { } startedAt)
+            {
+                // No BeginRace seen yet - nothing to compare against. The first map after a
+                // restart is a known blind spot, so never call it dead on that alone.
+                return true;
+            }
+
+            // If BeginRace stops arriving, startedAt stays pinned to the previous map while
+            // the poll keeps moving forward, so this gap grows without bound. In normal
+            // operation it is a few seconds - the poll interval - and never grows.
+            return lastPolledMapChangedAt - startedAt < CallbackGracePeriod;
+        }
+    }
 
     private bool SessionActive => sessionStopwatch is not null;
 
@@ -130,6 +197,7 @@ internal sealed partial class RandomizerGame
                 playerCheckpointProgress.Clear();
                 playerCheckpointTimestamp.Clear();
                 currentMapCheckpointTotal = null;
+                currentMapStartedAt = DateTimeOffset.UtcNow;
 
                 var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
                 currentMapCheckpointTotal = info.NbCheckpoints;
@@ -248,21 +316,37 @@ internal sealed partial class RandomizerGame
 
         client.On("TrackMania.PlayerChat", async (methodParams, cancellationToken) =>
         {
+            // Pulled out of the try so the catch below can still answer the player.
+            var login = methodParams.Length > 1 ? methodParams[1] as string : null;
+
             try
             {
                 var playerUid = (int)methodParams[0];
-                var login = (string)methodParams[1];
                 var message = (string)methodParams[2];
                 var isRegisteredCmd = (bool)methodParams[3];
 
                 if (isRegisteredCmd)
                 {
-                    await OnCommand(playerUid, login, message, cancellationToken);
+                    await OnCommand(playerUid, login!, message, cancellationToken);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Warning: chat command handling failed - {ex.Message}");
+
+                // This used to be console-only, so the player who typed the command saw
+                // nothing at all and reasonably concluded the server was ignoring them.
+                if (login is not null)
+                {
+                    try
+                    {
+                        await SendMessageAsync(login, $"$F00That command failed: {ex.Message}", cancellationToken);
+                    }
+                    catch (Exception replyEx)
+                    {
+                        Console.WriteLine($"Warning: could not tell {login} the command failed - {replyEx.Message}");
+                    }
+                }
             }
         });
 
@@ -452,6 +536,21 @@ internal sealed partial class RandomizerGame
     {
         RegisterCallbacks();
 
+        // The dedicated server's own anti-cheat bans players for "Time incoherence", and on a
+        // randomizer serving RPG, stunt and trial maps straight off TMX that fires on perfectly
+        // legitimate finishes - monster11_02 was banned on 2026-09-03 for completing an RPG map.
+        // ladder_mode is inactive now, which should stop it at the source; this clears anything
+        // that still slips through, so a false ban can never outlive a restart. Nothing in this
+        // controller ever bans anyone deliberately, so an empty ban list is the correct state.
+        try
+        {
+            await client.CallAsync("CleanBanList", [], cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: failed to clear the ban list - {ex.Message}");
+        }
+
         try
         {
             await SendWelcomeMessageAsync(login: null, cancellationToken);
@@ -471,6 +570,7 @@ internal sealed partial class RandomizerGame
         }
 
         _ = StatusWriteLoopAsync(cancellationToken);
+        _ = StalledMapWatchLoopAsync(cancellationToken);
 
         if (config.AutoStart)
         {
@@ -498,10 +598,162 @@ internal sealed partial class RandomizerGame
             }
         }
 
-        await client.WaitForCloseAsync(cancellationToken);
+        // WaitForCloseAsync is what keeps the process alive. A reconnect closes the old
+        // connection on purpose, so returning from it is not automatically a shutdown - check
+        // whether a reconnect caused it and re-attach to the new connection if so.
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            var generation = Volatile.Read(ref reconnectGeneration);
+
+            try
+            {
+                await client.WaitForCloseAsync(cancellationToken);
+            }
+            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            {
+                // the connection was torn out from under us by a reconnect
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (Volatile.Read(ref reconnectGeneration) == generation)
+            {
+                // The game server closed the connection and no reconnect of ours caused it.
+                // Falling out of RunAsync here ends Main and exits with code 0, which
+                // Restart=on-failure reads as "finished successfully" and leaves the server
+                // dead - that is exactly how it sat down for two days from 2026-09-04 19:18.
+                // Exit non-zero so it is recorded as a failure and systemd brings it back.
+                Console.WriteLine("ERROR: the game server closed the XML-RPC connection - exiting so systemd restarts us.");
+                await Console.Out.FlushAsync(cancellationToken);
+                Environment.Exit(75);
+            }
+
+            while (reconnectInProgress && !cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(200, cancellationToken);
+            }
+        }
+    }
+
+    // Step 1 of never letting a stall matter: rebuild the connection instead of restarting the
+    // process. Works with a full server, takes seconds, and nobody is kicked.
+    private async Task TryRecoverCallbacksAsync(CancellationToken cancellationToken)
+    {
+        if (DateTimeOffset.UtcNow - lastCallbackRecoveryAt < CallbackRecoveryCooldown)
+        {
+            return;
+        }
+
+        lastCallbackRecoveryAt = DateTimeOffset.UtcNow;
+        Console.WriteLine("Rebuilding the game server connection to recover the callback stream...");
+
+        reconnectInProgress = true;
+        Interlocked.Increment(ref reconnectGeneration);
+
+        try
+        {
+            await client.ReconnectAsync(cancellationToken);
+
+            // Give the fresh connection a clean slate rather than judging it on the old one's
+            // evidence; if it is still deaf, the next map change re-detects it.
+            var now = DateTimeOffset.UtcNow;
+            currentMapStartedAt = now;
+            lastPolledMapChangedAt = now;
+            callbackLossReported = false;
+            failedRecoveries = 0;
+
+            Console.WriteLine("Reconnected - callback stream restored without a restart.");
+        }
+        catch (Exception ex)
+        {
+            failedRecoveries++;
+            Console.WriteLine($"ERROR: reconnect failed ({failedRecoveries}) - {ex.Message}");
+
+            // Last resort only: if redialling keeps failing and nobody is racing, hand the
+            // problem to systemd. Never while players are on - a dead controller is bad, but
+            // kicking people mid-race to fix it is not our call.
+            if (failedRecoveries >= 3 && lastOnlinePlayerCount == 0)
+            {
+                Console.WriteLine("Reconnect keeps failing and nobody is online - restarting the controller.");
+                Environment.Exit(70);
+            }
+        }
+        finally
+        {
+            reconnectInProgress = false;
+        }
+    }
+
+    // Step 2: on a busy server a dead stream shows up at the next map change. On an idle empty
+    // one nothing changes at all, so the stall hides until somebody joins and hits it. Provoke a
+    // callback instead - ChallengeRestart always yields BeginRace, and with nobody online
+    // restarting the current map costs nothing.
+    private async Task ProbeCallbacksAsync(CancellationToken cancellationToken)
+    {
+        if (!SessionActive || lastOnlinePlayerCount > 0 || reconnectInProgress || isAdvancingToNextMap)
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+
+        if (now - client.LastCallbackAt < CallbackProbeIdle || now - lastCallbackProbeAt < CallbackProbeIdle)
+        {
+            return;
+        }
+
+        // isAdvancingToNextMap only covers our own call; the dedicated server keeps switching
+        // for several seconds after it returns, and a ChallengeRestart in that window eats the
+        // change. Stay well clear of any map that has just started.
+        if (now - lastPolledMapChangedAt < CallbackProbeMapSettleTime)
+        {
+            return;
+        }
+
+        lastCallbackProbeAt = now;
+        var before = client.CallbacksReceived;
+
+        Console.WriteLine("No callbacks for a while on an empty server - probing the stream.");
+        await CallWithTransitionRetryAsync("ChallengeRestart", [], cancellationToken);
+        await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+
+        if (client.CallbacksReceived == before)
+        {
+            Console.WriteLine("ERROR: the probe produced no callback - the stream is dead.");
+            await TryRecoverCallbacksAsync(cancellationToken);
+        }
     }
 
     private static readonly string statusFilePath = Path.Combine(AppContext.BaseDirectory, "WebStatus", "status.json");
+
+    private async Task StalledMapWatchLoopAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), cancellationToken);
+
+            try
+            {
+                await CheckStalledMapAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: stalled-map watchdog failed - {ex.Message}");
+            }
+
+            try
+            {
+                await ProbeCallbacksAsync(cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Warning: callback probe failed - {ex.Message}");
+            }
+        }
+    }
 
     private async Task StatusWriteLoopAsync(CancellationToken cancellationToken)
     {
@@ -509,11 +761,37 @@ internal sealed partial class RandomizerGame
         {
             try
             {
-                await WriteStatusAsync(cancellationToken);
+                using var writeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                writeTimeout.CancelAfter(TimeSpan.FromSeconds(8));
+                await WriteStatusAsync(writeTimeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                Console.WriteLine("Warning: status.json write timed out, retrying next tick.");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Warning: failed to write status.json - {ex.Message}");
+            }
+
+            if (CallbacksHealthy)
+            {
+                callbackLossReported = false;
+            }
+            else
+            {
+                if (!callbackLossReported)
+                {
+                    callbackLossReported = true;
+                    Console.WriteLine(
+                        "ERROR: the callback stream from the dedicated server is dead. The controller "
+                        + "is still polling but no longer driving the game - no chat commands, widgets "
+                        + "or map picks, and the playlist will just repeat. Restarting once empty.");
+                }
+
+                // Rebuild the connection rather than the process: this works with a full
+                // server and costs seconds, so a stall no longer waits for the server to empty.
+                await TryRecoverCallbacksAsync(cancellationToken);
             }
 
             await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
@@ -551,19 +829,33 @@ internal sealed partial class RandomizerGame
             }
         }
 
+        // The poll is the independent witness: it sees the map change whether or not the
+        // callback stream is still alive. CallbacksHealthy compares the two.
+        if (mapName is not null && mapName != lastPolledMapName)
+        {
+            lastPolledMapName = mapName;
+            lastPolledMapChangedAt = DateTimeOffset.UtcNow;
+        }
+
         // ranked by live race progress: most checkpoints first, ties broken by who reached
         // their current checkpoint first (see playerCheckpointTimestamp's declaration)
         var racers = onlinePlayers
             .Select(p => new
             {
                 Nickname = TmFormatCodeRegex().Replace(p.NickName, string.Empty),
+                // Kept alongside the stripped name so the website can render the
+                // colours people actually play under. Consumers that want plain
+                // text keep reading Nickname and are unaffected.
+                RawNickname = p.NickName,
                 Checkpoint = playerCheckpointProgress.GetValueOrDefault(p.Login, 0),
                 Since = playerCheckpointTimestamp.GetValueOrDefault(p.Login, DateTimeOffset.MaxValue),
             })
             .OrderByDescending(p => p.Checkpoint)
             .ThenBy(p => p.Since)
-            .Select((p, i) => new { p.Nickname, p.Checkpoint, IsLeader = i == 0 && p.Checkpoint > 0 })
+            .Select((p, i) => new { p.Nickname, p.RawNickname, p.Checkpoint, IsLeader = i == 0 && p.Checkpoint > 0 })
             .ToList();
+
+        lastOnlinePlayerCount = onlinePlayers.Count;
 
         var status = new
         {
@@ -577,7 +869,12 @@ internal sealed partial class RandomizerGame
             CurrentMapUrl = displayedTrackId is { } id ? $"https://{tmxRules.GetSiteUrl()}/trackshow/{id}" : null,
             CurrentMapImageUrl = displayedTrackId is { } imgId ? $"https://{tmxRules.GetSiteUrl()}/trackshow/{imgId}/image/1" : null,
             Players = racers,
-            Top = leaderboard.GetTop(5),
+            // 25 rather than 5: the website scrolls this list, and the in-game
+            // /top10 command takes its own slice, so nothing in chat gets longer.
+            Top = leaderboard.GetTop(25),
+            ControllerHealthy = CallbacksHealthy,
+            CallbacksReceived = client.CallbacksReceived,
+            LastCallbackAt = client.LastCallbackAt,
             UpdatedAt = DateTimeOffset.UtcNow,
         };
 
@@ -672,11 +969,75 @@ internal sealed partial class RandomizerGame
         await client.CallAsync("SetTimeAttackLimit", [config.TimeLimit.TotalMilliseconds - (int)elapsedMilliseconds], cancellationToken);
     }
 
+    // A map nobody can load - custom blocks the clients do not have, a corrupt file -
+    // looks exactly like this from the server's side: players connect, get dropped
+    // straight back out, so nobody is ever counted online and no checkpoint is ever
+    // reached. With AutoSkipMode=Finished nothing advances the rotation, so the server
+    // sits on that map indefinitely. TMX cannot help us here either: UnlimiterVersion is
+    // metadata the uploader declares, so a map built with custom blocks and uploaded
+    // without the flag passes inunlimiter=0 cleanly.
+    //
+    // Both conditions are required. "No checkpoints" alone would fire on a hard map
+    // someone is still struggling with; "nobody online" alone would fire on a quiet
+    // night and churn through the pool for no reason.
+    private static readonly TimeSpan StalledMapTimeout = TimeSpan.FromMinutes(15);
+
+    // The last map the watchdog already skipped, so a map that fails to advance
+    // cannot be reported over and over.
+    private int? lastStalledMapTrackId;
+
+    private async Task CheckStalledMapAsync(CancellationToken cancellationToken)
+    {
+        if (!SessionActive || isAdvancingToNextMap)
+        {
+            return;
+        }
+
+        if (currentMapStartedAt is not { } startedAt || DateTimeOffset.UtcNow - startedAt < StalledMapTimeout)
+        {
+            return;
+        }
+
+        if (lastOnlinePlayerCount > 0)
+        {
+            return;
+        }
+
+        foreach (var reached in playerCheckpointProgress.Values)
+        {
+            if (reached > 0)
+            {
+                return;
+            }
+        }
+
+        var trackId = currentMapTrackId ?? pendingMapTrackId;
+
+        if (trackId is not null && trackId == lastStalledMapTrackId)
+        {
+            return;
+        }
+
+        // Clear first: the advance below takes a moment, and the watchdog must not fire
+        // a second time for the same map while it is in flight.
+        currentMapStartedAt = null;
+        lastStalledMapTrackId = trackId;
+
+        Console.WriteLine($"Stalled-map watchdog: no players and no checkpoints for {StalledMapTimeout.TotalMinutes:F0} minutes, skipping map {trackId}.");
+        await SendMessageAsync($"$F80No players and no checkpoints for {StalledMapTimeout.TotalMinutes:F0} minutes - skipping this map.", cancellationToken);
+
+        // Deliberately no Discord post: this fires on an empty server, potentially
+        // several times a night, and nobody needs a notification for a map that had
+        // no audience. The console line above is the record. Player-initiated /imp
+        // reports still notify, because somebody is actually asking for attention.
+        await NextRandomMapAsync(goalReached: false, cancellationToken);
+    }
+
     private async Task SkipAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
         if (await client.IsMultiplePlayersAsync(cancellationToken))
         {
-            await SendMessageAsync($"Player {GetNicknameOrLogin(login)} wants to skip the current challenge.", cancellationToken);
+            await SendMessageAsync($"Player {GetNicknameOrLogin(login)} wants to skip the current challenge - this starts a vote.", cancellationToken);
         }
         else
         {
@@ -1491,6 +1852,27 @@ internal sealed partial class RandomizerGame
         return new string(buffer);
     }
 
+    // The dedicated server rejects RPCs while a challenge transition is underway with
+    // "Change in progress". That is transient - the transition settles in well under a
+    // second - so a /skip that lands at the wrong moment should wait and retry instead of
+    // failing outright, which is what made skipping look unreliable.
+    private async Task CallWithTransitionRetryAsync(string method, object[] args, CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await client.CallAsync(method, args, cancellationToken);
+                return;
+            }
+            catch (Exception ex) when (attempt < 4
+                && ex.Message.Contains("Change in progress", StringComparison.OrdinalIgnoreCase))
+            {
+                await Task.Delay(700, cancellationToken);
+            }
+        }
+    }
+
     public async Task NextRandomMapAsync(bool goalReached, CancellationToken cancellationToken)
     {
         // with multiple players, every finisher fires its own PlayerFinish -> NextRandomMapAsync
@@ -1501,14 +1883,18 @@ internal sealed partial class RandomizerGame
             return;
         }
 
-        isAdvancingToNextMap = true;
+        advanceStartedAt = DateTimeOffset.UtcNow;
         try
         {
             // In case there are multiple players, the session stopwatch cannot be stopped immediately
             // so in case there is actually just one player, we need to account for the time it took to setup the next challenge
             var setupWatch = Stopwatch.StartNew();
 
-            if (randomEnqueuedMapFileName is null)
+            // A forced id (/loadmap, or a /votemap that passed) has to win over whatever was
+            // already queued. Consuming it only when nothing was enqueued meant the queued
+            // random map loaded instead, and the forced id leaked into a later rotation - which
+            // is exactly why /votemap "sometimes didn't load the right map".
+            if (randomEnqueuedMapFileName is null || forcedNextMapTrackId is not null)
             {
                 var nextMap = forcedNextMapTrackId is { } forcedTrackId
                     ? await tmxRules.GetMapGbxByIdAsync(forcedTrackId, cancellationToken)
@@ -1559,7 +1945,11 @@ internal sealed partial class RandomizerGame
 
             if (await client.IsMultiplePlayersAsync(cancellationToken) && (!goalReached || config.CallVoteOnFinish))
             {
-                await client.CallAsync("CallVote", [XmlRpcClient.GenerateXmlPayload("NextChallenge", [])], cancellationToken);
+                await CallWithTransitionRetryAsync("CallVote", [XmlRpcClient.GenerateXmlPayload("NextChallenge", [])], cancellationToken);
+
+                // Say it out loud. With two or more players /skip does not skip - it opens a
+                // vote - and players who did not know that read the silence as a broken command.
+                await SendMessageAsync("$FF0A vote to load the next map has started - press $0F0F5$FF0 or type $0F0/yes$FF0 to agree.", cancellationToken);
             }
             else
             {
@@ -1585,13 +1975,25 @@ internal sealed partial class RandomizerGame
                     await SendMessageAsync("Next map is ready.", cancellationToken);
                 }
 
-                await client.CallAsync("NextChallenge", [], cancellationToken);
-                await client.CallAsync("ChallengeRestart", [], cancellationToken);
+                await CallWithTransitionRetryAsync("NextChallenge", [], cancellationToken);
+
+                // Deliberately NOT retried, and deliberately swallowed. NextChallenge already
+                // loads the map; this is only a nicety for the case where nothing was pending.
+                // "Change in progress" here means the change is already under way - retrying
+                // until it lands would cancel that change and restart the old map instead.
+                try
+                {
+                    await client.CallAsync("ChallengeRestart", [], cancellationToken);
+                }
+                catch (Exception)
+                {
+                    // a transition is in flight - the new map is already on its way
+                }
             }
         }
         finally
         {
-            isAdvancingToNextMap = false;
+            advanceStartedAt = null;
         }
     }
 
