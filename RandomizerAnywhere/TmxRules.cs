@@ -1,5 +1,6 @@
 using RandomizerAnywhere.Config;
 using System.Buffers;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http.Json;
@@ -12,6 +13,16 @@ internal sealed class TmxRules
     private const int MaxRecencyCheckedAttempts = 20;
     private const int MaxTotalAttempts = 100;
     private static readonly TimeSpan RecentWindow = TimeSpan.FromHours(1);
+
+    // An attempt cap alone is not a bound on how long this takes: each attempt is its own HTTP
+    // request with its own retry budget, and the whole search runs on the callback dispatch loop,
+    // where every second spent here is a second of frozen widgets and dead chat commands. With a
+    // struggling TMX, 100 attempts is long enough to take the server out for hours. A wall-clock
+    // ceiling makes a finish either produce a map promptly or fail loudly. 30s is roomy for the
+    // dozens of fast HEAD requests a normal search takes (recency and impossible-map exclusions
+    // each cost one), and leaves the gbx download enough room to still finish inside
+    // RemoteClient's handler cutoff, so that cutoff only ever fires on something pathological.
+    private static readonly TimeSpan MaxSearchDuration = TimeSpan.FromSeconds(30);
 
     private readonly HttpClient http;
     private readonly AppConfig config;
@@ -212,8 +223,16 @@ internal sealed class TmxRules
 
     private async Task<(HttpResponseMessage Response, int TrackId)> NextMapGbxResponseAsync(CancellationToken cancellationToken)
     {
+        var searchWatch = Stopwatch.StartNew();
+
         for (var attempt = 1; attempt <= MaxTotalAttempts; attempt++)
         {
+            if (searchWatch.Elapsed > MaxSearchDuration)
+            {
+                throw new InvalidOperationException(
+                    $"Gave up looking for a servable map after {searchWatch.Elapsed.TotalSeconds:0}s ({attempt - 1} attempts) - TMX is too slow or unreachable right now.");
+            }
+
             var tmxRandomUrl = $"{GetRandomTrackUrl()}?{config.TmxQueryOverride ?? BuildQuery()}";
 
             using var request = new HttpRequestMessage(HttpMethod.Head, tmxRandomUrl);

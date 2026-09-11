@@ -80,6 +80,10 @@ internal sealed partial class RandomizerGame
     // A healthy callback arrives within a second or two; this is deliberately generous.
     private static readonly TimeSpan CallbackGracePeriod = TimeSpan.FromSeconds(120);
 
+    // How long the stream may go completely silent with players online before it counts as dead.
+    // See CallbacksHealthy for why the map-change comparison above cannot catch that case.
+    private static readonly TimeSpan CallbackSilenceTimeout = TimeSpan.FromMinutes(5);
+
     private string? lastPolledMapName;
     private DateTimeOffset lastPolledMapChangedAt = DateTimeOffset.UtcNow;
     private bool callbackLossReported;
@@ -111,10 +115,23 @@ internal sealed partial class RandomizerGame
     // no map picks, so the dedicated server just rotates the playlist it has already
     // accumulated, which is what players see as "the track pool repeats and never adds maps".
     // Observed on 2026-09-02 13:00-19:00 and again 2026-09-03 from 12:05.
+    //
+    // That map-change witness is blind in exactly the case it is meant to catch, though: a dead
+    // stream also kills auto-skip, so nothing changes the map, so the poll sees nothing move and
+    // the gap never grows. On 2026-09-11 that let a 19-minute outage go undetected until the
+    // dedicated server happened to rotate on its own. Total callback silence while people are
+    // actually playing is the direct signal - a server with players on it produces checkpoint,
+    // finish and status callbacks constantly, so several minutes of nothing means nothing is
+    // being dispatched.
     private bool CallbacksHealthy
     {
         get
         {
+            if (lastOnlinePlayerCount > 0 && DateTimeOffset.UtcNow - client.LastCallbackAt > CallbackSilenceTimeout)
+            {
+                return false;
+            }
+
             if (currentMapStartedAt is not { } startedAt)
             {
                 // No BeginRace seen yet - nothing to compare against. The first map after a

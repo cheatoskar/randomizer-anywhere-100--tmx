@@ -2,6 +2,7 @@
 using Polly;
 using Polly.Retry;
 using RandomizerAnywhere.Config;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Linq;
@@ -253,13 +254,55 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         Attach(methodName, handler);
     }
 
+    // ManiaAPI dispatches callbacks from a single loop: it reads one message off an unbounded
+    // channel, awaits every handler registered for it, and only then reads the next. So a handler
+    // that blocks does not delay its own event - it silently freezes the whole stream. Chat
+    // commands, widgets, checkpoint HUDs, auto-skip and map picks all stop, while request/response
+    // keeps working on its own task, so the status page and status.json still look perfectly
+    // healthy. That is the "server randomly stops working" failure, and it hides well: the queue
+    // just grows, then flushes all at once when whatever was blocking finally lets go.
+    //
+    // Every slow thing a handler does is bounded individually now (HTTP budgets in
+    // CreateHttpClient, the map search in TmxRules), but those are policies and policies drift.
+    // This is the structural guarantee underneath them: no handler, for any reason, holds the
+    // stream for longer than this.
+    private static readonly TimeSpan HandlerTimeout = TimeSpan.FromSeconds(60);
+
+    // Well above a healthy handler (milliseconds, or a few seconds for a map advance) and well
+    // below the cutoff, so the log names the culprit before it becomes an outage.
+    private static readonly TimeSpan SlowHandlerWarning = TimeSpan.FromSeconds(15);
+
     private void Attach(string methodName, Func<object[], CancellationToken, Task> handler)
     {
         Raw.On(methodName, async (parameters, cancellationToken) =>
         {
             CallbacksReceived++;
             LastCallbackAt = DateTimeOffset.UtcNow;
-            await handler(parameters, cancellationToken);
+
+            using var handlerTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            handlerTimeout.CancelAfter(HandlerTimeout);
+
+            var startedAt = Stopwatch.GetTimestamp();
+
+            try
+            {
+                await handler(parameters, handlerTimeout.Token);
+            }
+            catch (OperationCanceledException) when (handlerTimeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                // Handlers catch their own exceptions, so this rarely surfaces here - the point is
+                // that the token is cancelled either way and the loop moves on.
+                Console.WriteLine($"ERROR: the {methodName} handler hit the {HandlerTimeout.TotalSeconds:0}s cutoff and was dropped to keep the callback stream moving.");
+            }
+            finally
+            {
+                var elapsed = Stopwatch.GetElapsedTime(startedAt);
+
+                if (elapsed >= SlowHandlerWarning)
+                {
+                    Console.WriteLine($"Warning: the {methodName} handler held the callback stream for {elapsed.TotalSeconds:0.0}s - every other callback was queued behind it.");
+                }
+            }
         });
     }
 

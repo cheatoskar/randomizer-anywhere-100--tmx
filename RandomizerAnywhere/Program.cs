@@ -71,13 +71,30 @@ finally
 [Singleton(typeof(Leaderboard))]
 internal partial class AppServiceProvider
 {
+    // Every TMX call on this client runs on the XML-RPC callback dispatch loop, which handles
+    // callbacks strictly one at a time and awaits each handler before reading the next message.
+    // So whatever budget is set here is also how long a single slow TMX request can freeze the
+    // ENTIRE controller - widgets, chat commands, auto-skip, all of it. This used to be
+    // MaxRetryAttempts = int.MaxValue with no timeout strategy at all, which let one struggling
+    // tm-exchange.com request retry until HttpClient's 100s default killed it, per attempt, over
+    // and over. Measured live on 2026-09-11: 19 minutes of a completely deaf controller, then the
+    // whole queued backlog flushed in a single second.
+    //
+    // Retry over timeout (AddRetry added first = outermost) so the per-attempt ceiling applies to
+    // each try rather than to all of them together, hard-capped by HttpClient.Timeout. A TMX
+    // outage now fails fast and loudly instead of stalling the game.
+    private static readonly TimeSpan HttpAttemptTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan HttpTotalTimeout = TimeSpan.FromSeconds(40);
+
     public static HttpClient CreateHttpClient()
     {
         var httpResilienceOptions = new HttpStandardResilienceOptions();
-        httpResilienceOptions.Retry.MaxRetryAttempts = int.MaxValue;
+        httpResilienceOptions.Retry.MaxRetryAttempts = 2;
+        httpResilienceOptions.Retry.Delay = TimeSpan.FromSeconds(1);
 
         var httpRetryPipeline = new ResiliencePipelineBuilder<HttpResponseMessage>()
             .AddRetry(httpResilienceOptions.Retry)
+            .AddTimeout(HttpAttemptTimeout)
             .Build();
 
         return new HttpClient(new ResilienceHandler(httpRetryPipeline)
@@ -87,7 +104,13 @@ internal partial class AppServiceProvider
                 PooledConnectionLifetime = TimeSpan.FromMinutes(15),
                 AllowAutoRedirect = false
             }
-        });
+        })
+        {
+            // The absolute ceiling for one request including its retries. Without it the only
+            // bound is HttpClient's 100s default, which applies per attempt and is far too long
+            // to sit on the callback loop.
+            Timeout = HttpTotalTimeout
+        };
     }
 
     public static AppConfig CreateAppConfig()
