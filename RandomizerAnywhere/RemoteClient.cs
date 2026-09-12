@@ -213,14 +213,22 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     private static ChallengeSummary ToChallengeSummary(Dictionary<string, object> mapInfo)
     {
-        var nbCheckpoints = mapInfo.TryGetValue("NbCheckpoints", out var cp) && (int)cp >= 0 ? (int)cp : (int?)null;
+        // TMF counts the finish line as a checkpoint here, so a map with 2 checkpoint blocks
+        // reports NbCheckpoints = 3. Every consumer shows this number to players - the in-game
+        // CP counter, /map, the "next map is ready" line, the status page - so all of them were
+        // one too high. Normalised once, here, rather than subtracting 1 in five places and
+        // forgetting the sixth. A negative value stays "unknown" (see GetCurrentChallengeInfoAsync).
+        var rawCheckpoints = mapInfo.TryGetValue("NbCheckpoints", out var cp) ? (int)cp : -1;
+        var nbCheckpoints = rawCheckpoints >= 0 ? Math.Max(rawCheckpoints - 1, 0) : (int?)null;
+
+        var fileName = mapInfo.TryGetValue("FileName", out var fn) ? fn as string : null;
         var lapRace = mapInfo.TryGetValue("LapRace", out var lr) && (bool)lr;
         var nbLaps = mapInfo.TryGetValue("NbLaps", out var nl) ? (int)nl : 0;
         var authorTime = mapInfo.TryGetValue("AuthorTime", out var at) ? (int)at : 0;
         var goldTime = mapInfo.TryGetValue("GoldTime", out var gt) ? (int)gt : 0;
         var silverTime = mapInfo.TryGetValue("SilverTime", out var st) ? (int)st : 0;
         var bronzeTime = mapInfo.TryGetValue("BronzeTime", out var bt) ? (int)bt : 0;
-        return new ChallengeSummary((string)mapInfo["Name"], nbCheckpoints, lapRace, nbLaps, authorTime, goldTime, silverTime, bronzeTime);
+        return new ChallengeSummary((string)mapInfo["Name"], fileName, nbCheckpoints, lapRace, nbLaps, authorTime, goldTime, silverTime, bronzeTime);
     }
 
     // GetChallengeList returns every map currently in the server's selection (playlist) - the same

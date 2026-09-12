@@ -33,6 +33,24 @@ internal sealed partial class RandomizerGame
     private int? currentMapTrackId;
     private int? pendingMapTrackId;
 
+    // True once BeginRace has looked at the running challenge, whether or not it could identify
+    // it. Before that, pendingMapTrackId is the best guess available; after it, currentMapTrackId
+    // is the answer even when that answer is "no idea" - falling back to the last map we picked
+    // is exactly how /map ended up reporting a map from a quarter of an hour earlier.
+    private bool currentMapIdentified;
+
+    // The one answer to "which TMX map is on right now" - used by /map, /imp, /hard, the status
+    // page and the stalled-map watchdog alike. Each of those used to spell out
+    // "currentMapTrackId ?? pendingMapTrackId" itself, which is why a stale id showed up in the
+    // chat link, the status page's preview image and the watchdog log all at once.
+    private int? DisplayedMapTrackId => currentMapIdentified ? currentMapTrackId : currentMapTrackId ?? pendingMapTrackId;
+
+    // Challenge file name (basename, no directory) -> the TMX id it was fetched by, for every map
+    // this process has inserted. The id is in the file name too and that is the primary source,
+    // but entries reused via FindSelectedChallengeFileNameAsync may predate that naming, so keep
+    // a direct record as well.
+    private readonly Dictionary<string, int> trackIdByChallengeFile = new(StringComparer.OrdinalIgnoreCase);
+
     // most recent first: mapHistory[0] is "-1", mapHistory[1] is "-2", etc. Capped at
     // MaxMapHistory so this can't grow unbounded over a long-running session.
     private readonly List<int> mapHistory = [];
@@ -209,17 +227,23 @@ internal sealed partial class RandomizerGame
                     SilverTime: (int)mapInfo["SilverTime"],
                     BronzeTime: (int)mapInfo["BronzeTime"]
                 );
-                currentMapTrackId = pendingMapTrackId;
-
                 playerCheckpointProgress.Clear();
                 playerCheckpointTimestamp.Clear();
                 currentMapCheckpointTotal = null;
                 currentMapStartedAt = DateTimeOffset.UtcNow;
 
                 var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+
+                // Ask the running challenge what it is instead of assuming it is whatever we last
+                // queued - the dedicated server also advances its own selection, and then those
+                // two are different maps. See InsertedChallengePath.
+                currentMapTrackId = ResolveRunningTrackId(info.FileName);
+                currentMapIdentified = true;
+
                 currentMapCheckpointTotal = info.NbCheckpoints;
 
-                if (info.NbCheckpoints is { } total)
+                // a map with no checkpoints at all has nothing to count, and "0/0" is just noise
+                if (info.NbCheckpoints is { } total && total > 0)
                 {
                     await client.SendManialinkPageAsync(BuildCheckpointManialink(0, total), cancellationToken: cancellationToken);
                 }
@@ -275,6 +299,7 @@ internal sealed partial class RandomizerGame
 
                 currentMap = null;
                 currentMapTrackId = null;
+                currentMapIdentified = false;
                 randomEnqueuedMapFileName = null;
                 currentMapCheckpointTotal = null;
                 playerCheckpointProgress.Clear();
@@ -296,12 +321,14 @@ internal sealed partial class RandomizerGame
                 var login = (string)methodParams[1];
                 var checkpointIndex = (int)methodParams[4];
 
-                if (currentMapCheckpointTotal is not { } total)
+                if (currentMapCheckpointTotal is not { } total || total <= 0)
                 {
                     return;
                 }
 
-                var current = checkpointIndex + 1;
+                // TMF numbers the finish line as a checkpoint too, so without the clamp the last
+                // one a player crosses reads as "4/3"
+                var current = Math.Min(checkpointIndex + 1, total);
                 playerCheckpointProgress[login] = current;
                 playerCheckpointTimestamp[login] = DateTimeOffset.UtcNow;
 
@@ -827,8 +854,7 @@ internal sealed partial class RandomizerGame
             // controller not fully connected yet, report nobody online for now
         }
 
-        // same fallback as /map, /imp, /hard - see ImpossibleAsync for why
-        var displayedTrackId = currentMapTrackId ?? pendingMapTrackId;
+        var displayedTrackId = DisplayedMapTrackId;
 
         string? mapName = null;
         int? nbCheckpoints = null;
@@ -1028,7 +1054,7 @@ internal sealed partial class RandomizerGame
             }
         }
 
-        var trackId = currentMapTrackId ?? pendingMapTrackId;
+        var trackId = DisplayedMapTrackId;
 
         if (trackId is not null && trackId == lastStalledMapTrackId)
         {
@@ -1076,10 +1102,52 @@ internal sealed partial class RandomizerGame
             return (historyIndex < mapHistory.Count ? mapHistory[historyIndex] : null, false);
         }
 
-        // fall back to pendingMapTrackId - the map we most recently told the server to load - since
-        // TrackMania.BeginRace (which confirms it into currentMapTrackId) can lag a few seconds
-        // behind the actual challenge switch, and pendingMapTrackId never gets reset in the meantime
-        return (currentMapTrackId ?? pendingMapTrackId, true);
+        return (DisplayedMapTrackId, true);
+    }
+
+    // The path a fetched TMX map gets inserted under. The TMX id goes into the name on purpose:
+    // the dedicated server rotates its own selection whenever a map ends without us advancing it
+    // (a time limit running out with nobody finishing, say), so "the map we last picked" and "the
+    // map actually running" drift apart, and the file name is the only thing that ties a running
+    // challenge back to the id it came from. Observed live on 2026-09-11: the controller had
+    // /map, the TMX link and the status page preview all pointing at a map from 15 minutes back.
+    private static string InsertedChallengePath(InMemoryFile map) =>
+        Path.Combine("_RandomizerAny", $"{DateTimeOffset.UtcNow.Ticks}_tmx{map.TrackId}_{map.FileName}");
+
+    // The server reports challenge paths in its own shape (directory separators differ, and it may
+    // hand back more or less of the path than we passed in), so match on the bare file name.
+    private static string ChallengeFileKey(string fileName)
+    {
+        var normalised = fileName.Replace('\\', '/');
+        var lastSlash = normalised.LastIndexOf('/');
+        return lastSlash >= 0 ? normalised[(lastSlash + 1)..] : normalised;
+    }
+
+    private void RememberChallengeTrackId(string fileName, int trackId)
+    {
+        trackIdByChallengeFile[ChallengeFileKey(fileName)] = trackId;
+    }
+
+    // null means "this is not a map we can identify" - a leftover from an older build still in the
+    // selection, or something that never came from TMX. Saying so beats linking the wrong map.
+    private int? ResolveRunningTrackId(string? fileName)
+    {
+        if (fileName is null)
+        {
+            return null;
+        }
+
+        var key = ChallengeFileKey(fileName);
+
+        if (trackIdByChallengeFile.TryGetValue(key, out var known))
+        {
+            return known;
+        }
+
+        return ChallengeTrackIdRegex().Match(key) is { Success: true } match
+            && int.TryParse(match.Groups[1].Value, out var trackId)
+                ? trackId
+                : null;
     }
 
     private async Task ImpossibleAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -1157,7 +1225,12 @@ internal sealed partial class RandomizerGame
 
         if (trackId is not { } id)
         {
-            var noMapMessage = isCurrent ? "$F00No map is currently loaded." : "$F00No previous map recorded yet.";
+            // "couldn't identify" rather than "nothing loaded": with the server free to rotate its
+            // own selection, a map can be running that this controller never picked and cannot
+            // trace back to a TMX id (see ResolveRunningTrackId)
+            var noMapMessage = isCurrent
+                ? "$F00Couldn't identify the map that's currently running."
+                : "$F00No previous map recorded yet.";
             await SendMessageAsync(login, noMapMessage, cancellationToken);
             return;
         }
@@ -1929,7 +2002,7 @@ internal sealed partial class RandomizerGame
 
                 if (mapPath is null)
                 {
-                    mapPath = Path.Combine("_RandomizerAny", $"{DateTimeOffset.UtcNow.Ticks}_{nextMap.FileName}");
+                    mapPath = InsertedChallengePath(nextMap);
                     await client.WriteFileAsync(mapPath, nextMap.Data, cancellationToken);
 
                     // This retry loop is only for the TRANSIENT race: InsertChallenge called again
@@ -1955,6 +2028,10 @@ internal sealed partial class RandomizerGame
                 }
 
                 await client.CallAsync("SetGameMode", [1], cancellationToken);
+
+                // Both paths above end up here, so a reused selection entry inserted under the
+                // older naming scheme still gets tied to its TMX id for ResolveRunningTrackId.
+                RememberChallengeTrackId(mapPath, nextMap.TrackId);
 
                 randomEnqueuedMapFileName = mapPath;
                 pendingMapTrackId = nextMap.TrackId;
@@ -2117,7 +2194,15 @@ internal sealed partial class RandomizerGame
             BronzeTime: info.BronzeTime
         );
         currentMapCheckpointTotal ??= info.NbCheckpoints;
-        currentMapTrackId ??= pendingMapTrackId;
+
+        // Same source of truth as BeginRace, and for the same reason: this used to fall back to
+        // pendingMapTrackId, which is only the right answer when the server loaded the map we
+        // queued rather than rotating its own selection.
+        if (!currentMapIdentified)
+        {
+            currentMapTrackId = ResolveRunningTrackId(info.FileName);
+            currentMapIdentified = true;
+        }
 
         return info;
     }
@@ -2129,9 +2214,9 @@ internal sealed partial class RandomizerGame
     {
         var info = await EnsureCurrentMapStateAsync(cancellationToken);
 
-        if (currentMapCheckpointTotal is { } total)
+        if (currentMapCheckpointTotal is { } total && total > 0)
         {
-            var current = playerCheckpointProgress.GetValueOrDefault(login, 0);
+            var current = Math.Min(playerCheckpointProgress.GetValueOrDefault(login, 0), total);
             await client.SendManialinkPageToLoginAsync(login, BuildCheckpointManialink(current, total), cancellationToken: cancellationToken);
         }
 
@@ -2416,4 +2501,8 @@ internal sealed partial class RandomizerGame
 
     [GeneratedRegex(@"\$([0-9a-fA-F]{3}|[<>oiswnmgzt$])")]
     private static partial Regex TmFormatCodeRegex();
+
+    // the "_tmx<id>_" marker InsertedChallengePath puts into every map path we insert
+    [GeneratedRegex(@"_tmx(\d+)_")]
+    private static partial Regex ChallengeTrackIdRegex();
 }
