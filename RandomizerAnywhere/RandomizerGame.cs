@@ -856,20 +856,20 @@ internal sealed partial class RandomizerGame
 
         var displayedTrackId = DisplayedMapTrackId;
 
+        // Name and checkpoint count come straight from the dedicated server and are true whether
+        // or not we can tie the map to a TMX id - only the link and the preview image need the id.
+        // Gating all of it on the id blanked the entire status page for a map we couldn't identify.
         string? mapName = null;
         int? nbCheckpoints = null;
-        if (displayedTrackId is not null)
+        try
         {
-            try
-            {
-                var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
-                mapName = TmFormatCodeRegex().Replace(info.Name, string.Empty);
-                nbCheckpoints = info.NbCheckpoints;
-            }
-            catch (Exception)
-            {
-                // map info not available yet
-            }
+            var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
+            mapName = TmFormatCodeRegex().Replace(info.Name, string.Empty);
+            nbCheckpoints = info.NbCheckpoints;
+        }
+        catch (Exception)
+        {
+            // map info not available yet
         }
 
         // The poll is the independent witness: it sees the map change whether or not the
@@ -1132,22 +1132,27 @@ internal sealed partial class RandomizerGame
     // selection, or something that never came from TMX. Saying so beats linking the wrong map.
     private int? ResolveRunningTrackId(string? fileName)
     {
-        if (fileName is null)
+        if (fileName is not null)
         {
-            return null;
+            var key = ChallengeFileKey(fileName);
+
+            if (trackIdByChallengeFile.TryGetValue(key, out var known))
+            {
+                return known;
+            }
+
+            if (ChallengeTrackIdRegex().Match(key) is { Success: true } match
+                && int.TryParse(match.Groups[1].Value, out var trackId))
+            {
+                return trackId;
+            }
         }
 
-        var key = ChallengeFileKey(fileName);
-
-        if (trackIdByChallengeFile.TryGetValue(key, out var known))
-        {
-            return known;
-        }
-
-        return ChallengeTrackIdRegex().Match(key) is { Success: true } match
-            && int.TryParse(match.Groups[1].Value, out var trackId)
-                ? trackId
-                : null;
+        // Says which of the two it was - no file name in the server's response at all, or a name
+        // that carries no id - so an unexpected "unknown map" is diagnosable from the log instead
+        // of just being a blank in chat and on the status page.
+        Console.WriteLine($"Note: couldn't tie the running challenge to a TMX id (FileName: {fileName ?? "<not reported>"}).");
+        return null;
     }
 
     private async Task ImpossibleAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
