@@ -2168,20 +2168,20 @@ internal sealed partial class RandomizerGame
                     await SendMessageAsync("Next map is ready.", cancellationToken);
                 }
 
+                // InsertChallenge puts the map "after the current challenge" and NextChallenge
+                // switches to it - that pair is the whole operation, nothing else is needed.
+                //
+                // There used to be a ChallengeRestart here, kept as a "nicety for the case where
+                // nothing was pending". It was not harmless: when it arrived before the server had
+                // begun the switch it cancelled the switch and reloaded the map already running.
+                // Caught red-handed at startup on 2026-09-13, where the transition log showed
+                // BeginRace firing twice for the same warmup map:
+                //   Next track ID: 8142967
+                //   Map loaded: unidentified (RPG impossible) - we had queued 8142967.
+                // The server then sat on that map indefinitely, because with AutoSkipMode=Finished
+                // nothing advances a map nobody can finish and the stalled-map watchdog only fires
+                // on an empty server. Every restart stranded players on the warmup map.
                 await CallWithTransitionRetryAsync("NextChallenge", [], cancellationToken);
-
-                // Deliberately NOT retried, and deliberately swallowed. NextChallenge already
-                // loads the map; this is only a nicety for the case where nothing was pending.
-                // "Change in progress" here means the change is already under way - retrying
-                // until it lands would cancel that change and restart the old map instead.
-                try
-                {
-                    await client.CallAsync("ChallengeRestart", [], cancellationToken);
-                }
-                catch (Exception)
-                {
-                    // a transition is in flight - the new map is already on its way
-                }
             }
         }
         finally
