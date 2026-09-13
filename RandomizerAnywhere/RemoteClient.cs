@@ -164,6 +164,17 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         return playerCount > 1;
     }
 
+    // How many players have a time on the current challenge. The dedicated server maintains this
+    // itself, so it moves whether or not the callback stream is alive - which makes it the one
+    // piece of evidence that someone is actually RACING, as opposed to merely being connected.
+    // The health check needs exactly that distinction; see RandomizerGame.CallbacksHealthy.
+    public async Task<int> GetCurrentRankingCountAsync(CancellationToken cancellationToken = default)
+    {
+        var ranking = await Raw.CallAsync<List<object>>("GetCurrentRanking", [200, 0], cancellationToken);
+        return ranking.OfType<Dictionary<string, object>>()
+            .Count(p => p.TryGetValue("BestTime", out var best) && best is int time && time > 0);
+    }
+
     public async Task<int> GetPlayerCountAsync(CancellationToken cancellationToken = default)
     {
         var players = await GetPlayersAsync(cancellationToken);

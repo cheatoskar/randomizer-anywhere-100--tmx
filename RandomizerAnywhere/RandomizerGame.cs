@@ -1,6 +1,7 @@
 using ManiaAPI.XmlRpc;
 using RandomizerAnywhere.Config;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using TmEssentials;
@@ -38,6 +39,10 @@ internal sealed partial class RandomizerGame
     // is the answer even when that answer is "no idea" - falling back to the last map we picked
     // is exactly how /map ended up reporting a map from a quarter of an hour earlier.
     private bool currentMapIdentified;
+
+    // The running challenge's path as the server spells it, kept so the next BeginRace can hand
+    // that exact string back to RemoveChallenge.
+    private string? currentMapFileName;
 
     // The one answer to "which TMX map is on right now" - used by /map, /imp, /hard, the status
     // page and the stalled-map watchdog alike. Each of those used to spell out
@@ -98,13 +103,20 @@ internal sealed partial class RandomizerGame
     // A healthy callback arrives within a second or two; this is deliberately generous.
     private static readonly TimeSpan CallbackGracePeriod = TimeSpan.FromSeconds(120);
 
-    // How long the stream may go completely silent with players online before it counts as dead.
-    // See CallbacksHealthy for why the map-change comparison above cannot catch that case.
-    private static readonly TimeSpan CallbackSilenceTimeout = TimeSpan.FromMinutes(5);
+    // How far the poll's evidence of racing may run ahead of the last callback before the stream
+    // counts as dead. A finish or an improved time produces a callback within a second or two.
+    private static readonly TimeSpan CallbackRacingGracePeriod = TimeSpan.FromSeconds(90);
 
     private string? lastPolledMapName;
     private DateTimeOffset lastPolledMapChangedAt = DateTimeOffset.UtcNow;
     private bool callbackLossReported;
+
+    // Racing evidence straight from the dedicated server: how many players hold a time on the
+    // current map, and when the poll last saw that number grow. Reset by the poll (never by a
+    // callback) whenever the map changes, so it can never be stale in a way that accuses a
+    // healthy stream.
+    private int lastPolledRankedCount;
+    private DateTimeOffset? lastRacingProgressAt;
 
     // Reconnecting deliberately closes the old connection, which WaitForCloseAsync cannot tell
     // apart from the game server going away. The generation counter lets the keep-alive loop
@@ -137,15 +149,21 @@ internal sealed partial class RandomizerGame
     // That map-change witness is blind in exactly the case it is meant to catch, though: a dead
     // stream also kills auto-skip, so nothing changes the map, so the poll sees nothing move and
     // the gap never grows. On 2026-09-11 that let a 19-minute outage go undetected until the
-    // dedicated server happened to rotate on its own. Total callback silence while people are
-    // actually playing is the direct signal - a server with players on it produces checkpoint,
-    // finish and status callbacks constantly, so several minutes of nothing means nothing is
-    // being dispatched.
+    // dedicated server happened to rotate on its own.
+    //
+    // The second witness below covers that. It replaces a "players online and no callback for
+    // five minutes" check that was plain wrong: online is not the same as racing, and on an
+    // unlimited time limit a lobby of idle players generates no callbacks at all, so a perfectly
+    // healthy stream got declared dead and reconnected every five minutes - visible on 2026-09-13
+    // as reconnect pairs 5:01 apart. What matters is not silence, it is silence while something
+    // is demonstrably happening, and the current ranking is the server's own record of that.
     private bool CallbacksHealthy
     {
         get
         {
-            if (lastOnlinePlayerCount > 0 && DateTimeOffset.UtcNow - client.LastCallbackAt > CallbackSilenceTimeout)
+            // Someone set or improved a time - the server says so - but no callback has arrived
+            // since. Nothing legitimate does that.
+            if (lastRacingProgressAt is { } racingAt && racingAt - client.LastCallbackAt > CallbackRacingGracePeriod)
             {
                 return false;
             }
@@ -237,8 +255,23 @@ internal sealed partial class RandomizerGame
                 // Ask the running challenge what it is instead of assuming it is whatever we last
                 // queued - the dedicated server also advances its own selection, and then those
                 // two are different maps. See InsertedChallengePath.
+                var previousMapFileName = currentMapFileName;
+                currentMapFileName = info.FileName;
                 currentMapTrackId = ResolveRunningTrackId(info.FileName);
                 currentMapIdentified = true;
+
+                LogMapTransition(info);
+
+                // Drop the map we just came off the server's playlist. Until this existed the
+                // selection only ever grew, so any advance that did not land on the map we queued
+                // served an already-played one - which is what players see as "it keeps giving us
+                // maps we already finished". Done here rather than in EndRace because the outgoing
+                // map is only safely removable once a different one is confirmed running.
+                if (previousMapFileName is not null
+                    && !ChallengeFileKey(previousMapFileName).Equals(ChallengeFileKey(info.FileName ?? string.Empty), StringComparison.OrdinalIgnoreCase))
+                {
+                    await RemovePlayedChallengeAsync(previousMapFileName, cancellationToken);
+                }
 
                 currentMapCheckpointTotal = info.NbCheckpoints;
 
@@ -706,6 +739,8 @@ internal sealed partial class RandomizerGame
             var now = DateTimeOffset.UtcNow;
             currentMapStartedAt = now;
             lastPolledMapChangedAt = now;
+            lastPolledRankedCount = 0;
+            lastRacingProgressAt = null;
             callbackLossReported = false;
             failedRecoveries = 0;
 
@@ -878,6 +913,29 @@ internal sealed partial class RandomizerGame
         {
             lastPolledMapName = mapName;
             lastPolledMapChangedAt = DateTimeOffset.UtcNow;
+
+            // A new map clears the ranking, so start counting from zero again. Doing this from
+            // the poll and not from BeginRace is the point - a witness that needs the callback
+            // stream to stay correct is no witness at all.
+            lastPolledRankedCount = 0;
+            lastRacingProgressAt = null;
+        }
+
+        // Second witness: the server's own record of who has a time on this map. It only ever
+        // grows within a map, and it grows precisely when a callback should have fired.
+        try
+        {
+            var rankedCount = await client.GetCurrentRankingCountAsync(cancellationToken);
+
+            if (rankedCount > lastPolledRankedCount)
+            {
+                lastPolledRankedCount = rankedCount;
+                lastRacingProgressAt = DateTimeOffset.UtcNow;
+            }
+        }
+        catch (Exception)
+        {
+            // ranking not available right now - just skip this witness for this tick
         }
 
         // ranked by live race progress: most checkpoints first, ties broken by who reached
@@ -1126,6 +1184,42 @@ internal sealed partial class RandomizerGame
     private void RememberChallengeTrackId(string fileName, int trackId)
     {
         trackIdByChallengeFile[ChallengeFileKey(fileName)] = trackId;
+    }
+
+    // One line per map change, because the controller logged which map it PICKED and never which
+    // map actually LOADED - and those two turned out to come apart routinely, which is exactly the
+    // thing players were reporting and the thing the log could not answer.
+    private void LogMapTransition(ChallengeSummary info)
+    {
+        var loaded = currentMapTrackId is { } id ? id.ToString(CultureInfo.InvariantCulture) : "unidentified";
+        var name = TmFormatCodeRegex().Replace(info.Name, string.Empty);
+
+        if (currentMapTrackId is not null && currentMapTrackId == pendingMapTrackId)
+        {
+            Console.WriteLine($"Map loaded: {loaded} ({name}).");
+            return;
+        }
+
+        // The interesting case: the server put on something other than what we queued, which means
+        // it advanced through its own selection instead of taking our insert.
+        var expected = pendingMapTrackId is { } pending ? pending.ToString(CultureInfo.InvariantCulture) : "nothing";
+        Console.WriteLine($"Map loaded: {loaded} ({name}) - we had queued {expected}. The server advanced through its own playlist.");
+    }
+
+    // Takes the map out of the server's playlist; the .Gbx stays on disk and
+    // trackIdByChallengeFile keeps the id, so history and /map are unaffected. Best effort by
+    // design: TMF refuses to remove the last remaining challenge, and that refusal is fine - it
+    // just means there is nothing to prune yet.
+    private async Task RemovePlayedChallengeAsync(string fileName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await client.CallAsync("RemoveChallenge", [fileName], cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Note: couldn't drop the previous map from the playlist - {ex.Message}");
+        }
     }
 
     // null means "this is not a map we can identify" - a leftover from an older build still in the
@@ -2207,6 +2301,9 @@ internal sealed partial class RandomizerGame
         {
             currentMapTrackId = ResolveRunningTrackId(info.FileName);
             currentMapIdentified = true;
+            // so the next BeginRace still knows what to prune, even on the path where BeginRace
+            // never fired for this map in the first place
+            currentMapFileName ??= info.FileName;
         }
 
         return info;
