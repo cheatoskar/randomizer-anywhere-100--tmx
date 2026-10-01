@@ -34,6 +34,14 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
     // milliseconds, so anything near this means the dedicated server (or the socket) is stalling.
     private static readonly TimeSpan SlowRpcThreshold = TimeSpan.FromSeconds(2);
 
+    // Hard limit for a single call. A healthy call answers in milliseconds, but on 2026-10-01 one
+    // SendDisplayManialinkPage never got its reply while every other call kept answering in
+    // 1-45 ms - and because it was made from inside the BeginRace handler, which holds the whole
+    // callback stream, that one lost reply froze every callback for the full 60 s handler cutoff.
+    // Bounding each call keeps a single lost reply down to this long, and the caller gets an
+    // ordinary exception it already knows how to handle.
+    private static readonly TimeSpan RpcTimeout = TimeSpan.FromSeconds(10);
+
     // Every call to the dedicated server goes through here so each one is timed and recorded in the
     // flight recorder (see Diagnostics). Behaviour is unchanged: same call, same exceptions.
     public async Task<T> TracedCallAsync<T>(string method, object[] parameters, CancellationToken cancellationToken = default)
@@ -43,9 +51,19 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
         try
         {
-            var result = await Raw.CallAsync<T>(method, parameters, cancellationToken);
-            LogRpcFinished(method, startedAt, error: null);
-            return result;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(RpcTimeout);
+
+            try
+            {
+                var result = await Raw.CallAsync<T>(method, parameters, timeout.Token);
+                LogRpcFinished(method, startedAt, error: null);
+                return result;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException($"{method} got no reply within {RpcTimeout.TotalSeconds:0}s");
+            }
         }
         catch (Exception ex)
         {
@@ -61,9 +79,19 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
         try
         {
-            var result = await Raw.CallAsync(method, parameters, cancellationToken);
-            LogRpcFinished(method, startedAt, error: null);
-            return result;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(RpcTimeout);
+
+            try
+            {
+                var result = await Raw.CallAsync(method, parameters, timeout.Token);
+                LogRpcFinished(method, startedAt, error: null);
+                return result;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException($"{method} got no reply within {RpcTimeout.TotalSeconds:0}s");
+            }
         }
         catch (Exception ex)
         {
@@ -88,6 +116,12 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
         if (elapsed >= SlowRpcThreshold)
         {
             Console.WriteLine($"[diag] slow call: {method} took {elapsed.TotalSeconds:0.0}s{(error is null ? string.Empty : $" and failed ({error.GetType().Name}: {error.Message})")}");
+        }
+
+        if (error is TimeoutException)
+        {
+            // a lost reply: keep the surrounding history, it is what shows what led up to it
+            Diagnostics.Dump($"call timed out: {method}", recentLines: 150);
         }
     }
 
@@ -204,9 +238,19 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
         try
         {
-            var result = await Raw.SystemMulticallAsync(callList, cancellationToken);
-            LogRpcFinished($"multicall x{callList.Count}", startedAt, error: null);
-            return result;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(RpcTimeout);
+
+            try
+            {
+                var result = await Raw.SystemMulticallAsync(callList, timeout.Token);
+                LogRpcFinished($"multicall x{callList.Count}", startedAt, error: null);
+                return result;
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException($"multicall x{callList.Count} got no reply within {RpcTimeout.TotalSeconds:0}s");
+            }
         }
         catch (Exception ex)
         {
@@ -399,7 +443,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
                 if (elapsed >= SlowHandlerWarning)
                 {
                     Console.WriteLine($"Warning: the {methodName} handler held the callback stream for {elapsed.TotalSeconds:0.0}s - every other callback was queued behind it.");
-                    Diagnostics.Dump($"{methodName} handler held the callback stream for {elapsed.TotalSeconds:0.0}s");
+                    Diagnostics.Dump($"{methodName} handler held the callback stream for {elapsed.TotalSeconds:0.0}s", recentLines: 150);
                 }
                 else if (elapsed >= SlowRpcThreshold)
                 {
