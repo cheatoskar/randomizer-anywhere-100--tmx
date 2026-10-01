@@ -1,0 +1,58 @@
+# Config for the TMUF server (second instance next to the TMNF one).
+# setup-tmuf.sh installs this as /opt/randomizer-anywhere-tmuf/publish/config.toml and copies
+# AdminLogins, PublicHost and the Discord webhooks over from the TMNF server's config.
+# The ONLY things left to fill in by hand are the three Server* account values near the bottom.
+
+Game = "TMUF"
+TmxGame = "TMUF"
+BindIP = ""
+XmlRpcPort = 5001
+AutoSkipMode = "AuthorMedal"
+TimeLimit = 0
+
+Preset = "100tmx_tmuf"
+
+ServerName = "100% TMX Project (TMUF)"
+ServerComment = "100% TMX RMC (TMUF) - random maps, first to finish wins. Type /info or /source in chat."
+GameSettings = "MatchSettings/Randomizer.txt"
+
+AutoStart = true
+
+# copied from the TMNF server's config by setup-tmuf.sh
+AdminLogins = ""
+
+# the status page / replay download port (the TMNF server uses 8090)
+ReplayServerPort = 8091
+
+# copied from the TMNF server's config by setup-tmuf.sh
+PublicHost = ""
+
+Lan = false
+
+# copied from the TMNF server's config by setup-tmuf.sh. Reports from this server are tagged "[TMUF]".
+DiscordWebhookUrl = ""
+DiscordWebhookUrlHard = ""
+
+WelcomeMessage = '''
+Built on $FF0Randomizer Anywhere$FF0 (modified) - type $FF0/source$FF0 for the code.
+$FF0Welcome to $s$0BF100% TMX $FF8Project $0F0TMUF$FF0!
+Type $FF0/info$FF0 to see what this server can do.
+'''
+
+# --- this server's own ports (the TMNF server uses 2350 / 3450 / 5000) ---
+ServerPort = 2351
+ServerP2PPort = 3451
+
+# --- the TMUF server account: FILL THESE IN, then start the service ---
+# Same three values the TMNF server has in its dedicated_cfg.txt <masterserver_account> block.
+ServerLogin = ""
+ServerPassword = ""
+ServerValidationKey = ""
+
+[DownloadUrls]
+TMF = "http://files2.trackmaniaforever.com/TrackmaniaServer_2011-02-21.zip"
+TM = "http://slig.free.fr/TM/dedicated/TmDedicatedServer_2006-05-30.zip"
+
+[TmxQuery]
+primarytype = 0
+inunlimiter = 0

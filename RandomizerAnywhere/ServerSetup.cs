@@ -152,6 +152,43 @@ internal sealed partial class ServerSetup
         }
 
         contents = XmlRpcPortRegex().Replace(contents, $"<xmlrpc_port>{config.XmlRpcPort}</xmlrpc_port>");
+
+        // A second server on the same machine needs its own game and peer-to-peer ports, and its own
+        // server account. Only written when configured, so the first server's file stays as it is.
+        if (config.ServerPort > 0)
+        {
+            contents = ServerPortRegex().Replace(contents, _ => $"<server_port>{config.ServerPort}</server_port>");
+        }
+
+        if (config.ServerP2PPort > 0)
+        {
+            contents = ServerP2PPortRegex().Replace(contents, _ => $"<server_p2p_port>{config.ServerP2PPort}</server_p2p_port>");
+        }
+
+        if (game == DedicatedServerType.TMF)
+        {
+            contents = MasterServerAccountRegex().Replace(contents, block =>
+            {
+                var text = block.Value;
+
+                if (!string.IsNullOrWhiteSpace(config.ServerLogin))
+                {
+                    text = LoginTagRegex().Replace(text, _ => $"<login>{System.Security.SecurityElement.Escape(config.ServerLogin)}</login>");
+                }
+
+                if (!string.IsNullOrWhiteSpace(config.ServerPassword))
+                {
+                    text = PasswordTagRegex().Replace(text, _ => $"<password>{System.Security.SecurityElement.Escape(config.ServerPassword)}</password>");
+                }
+
+                if (!string.IsNullOrWhiteSpace(config.ServerValidationKey))
+                {
+                    text = ValidationKeyTagRegex().Replace(text, _ => $"<validation_key>{System.Security.SecurityElement.Escape(config.ServerValidationKey)}</validation_key>");
+                }
+
+                return text;
+            });
+        }
         contents = ValidationSeedRegex().Replace(contents, "<use_changing_validation_seed>True</use_changing_validation_seed>");
 
         await File.WriteAllTextAsync(filePath, contents, cancellationToken);
@@ -410,6 +447,26 @@ internal sealed partial class ServerSetup
 
     [GeneratedRegex(@"<xmlrpc_port>(\d+)<\/xmlrpc_port>", RegexOptions.IgnoreCase)]
     private static partial Regex XmlRpcPortRegex();
+
+    [GeneratedRegex(@"<server_port>(\d+)<\/server_port>", RegexOptions.IgnoreCase)]
+    private static partial Regex ServerPortRegex();
+
+    [GeneratedRegex(@"<server_p2p_port>(\d+)<\/server_p2p_port>", RegexOptions.IgnoreCase)]
+    private static partial Regex ServerP2PPortRegex();
+
+    // the <masterserver_account> block only - the file has several other <login>/<password> tags
+    // (the SuperAdmin/Admin/User levels) that must never be touched
+    [GeneratedRegex(@"<masterserver_account>.*?<\/masterserver_account>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex MasterServerAccountRegex();
+
+    [GeneratedRegex(@"<login>.*?<\/login>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex LoginTagRegex();
+
+    [GeneratedRegex(@"<password>.*?<\/password>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex PasswordTagRegex();
+
+    [GeneratedRegex(@"<validation_key>.*?<\/validation_key>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex ValidationKeyTagRegex();
 
     [GeneratedRegex(@"<packmask>(.*?)<\/packmask>", RegexOptions.IgnoreCase)]
     private static partial Regex PackmaskRegex();

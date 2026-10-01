@@ -1361,7 +1361,7 @@ internal sealed partial class RandomizerGame
 
         var skipSuffix = isCurrent ? ", skipping" : string.Empty;
         await SendMessageAsync($"$F00Map {id} reported impossible by {GetNicknameOrLogin(login)} - won't be shown again until reviewed{skipSuffix}.", cancellationToken);
-        await discordNotifier.PostAsync($"**{GetPlainNickname(login)}** reported map **{id}** as impossible: {tmxUrl}", cancellationToken);
+        await discordNotifier.PostAsync($"{DiscordServerTag}**{GetPlainNickname(login)}** reported map **{id}** as impossible: {tmxUrl}", cancellationToken);
 
         // only advance the session if we're reporting the map that's actually loaded right now -
         // "/imp -1" reports a map that's already gone, the current one has nothing to do with it
@@ -1409,6 +1409,10 @@ internal sealed partial class RandomizerGame
         }
     }
 
+    // both servers can share one Discord webhook, so say which one a report came from; the original
+    // TMNF server keeps its messages exactly as they were
+    private string DiscordServerTag => config.EffectiveTmxGame == GameTitle.TMNF ? string.Empty : $"[{config.EffectiveTmxGame}] ";
+
     private async Task HardAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
         var (trackId, _) = ResolveMapReference(args);
@@ -1422,7 +1426,7 @@ internal sealed partial class RandomizerGame
         var tmxUrl = $"https://{tmxRules.GetSiteUrl()}/trackshow/{id}";
 
         await SendMessageAsync($"$FF0Map {id} flagged as hard by {GetNicknameOrLogin(login)} for review.", cancellationToken);
-        await discordNotifier.PostHardAsync($"**{GetPlainNickname(login)}** flagged map **{id}** as hard: {tmxUrl}", cancellationToken);
+        await discordNotifier.PostHardAsync($"{DiscordServerTag}**{GetPlainNickname(login)}** flagged map **{id}** as hard: {tmxUrl}", cancellationToken);
     }
 
     private async Task TopAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -1753,6 +1757,13 @@ internal sealed partial class RandomizerGame
         randomEnqueuedMapFileName = null;
     }
 
+    // a TMNF preset must not show up (or be applied) on the TMUF server and vice versa
+    private bool IsPresetForThisGame(string presetName)
+    {
+        var preset = TomlLoader.LoadPresetConfig(Path.Combine(AppContext.BaseDirectory, "Presets", presetName + ".toml"));
+        return preset is null || preset.SupportsGame(config.Game);
+    }
+
     private (bool Success, string? DisplayName, string? Error) TryApplyPreset(string presetName)
     {
         var presetPath = Path.Combine(AppContext.BaseDirectory, "Presets", presetName + ".toml");
@@ -1767,6 +1778,11 @@ internal sealed partial class RandomizerGame
         if (presetConfig is null)
         {
             return (false, null, $"Failed to load preset '{presetName}'.");
+        }
+
+        if (!presetConfig.SupportsGame(config.Game))
+        {
+            return (false, null, $"Preset '{presetName}' is not for this game.");
         }
 
         presetConfig.Apply(config);
@@ -1793,7 +1809,7 @@ internal sealed partial class RandomizerGame
         var presetName = args[0];
         var presetPath = Path.Combine(AppContext.BaseDirectory, "Presets", presetName + ".toml");
 
-        if (!File.Exists(presetPath))
+        if (!File.Exists(presetPath) || !IsPresetForThisGame(presetName))
         {
             await SendMessageAsync(login, $"$F00Preset '{presetName}' not found.", cancellationToken);
             return;
@@ -2082,6 +2098,7 @@ internal sealed partial class RandomizerGame
             .Select(Path.GetFileNameWithoutExtension)
             .Where(name => !string.IsNullOrEmpty(name))
             .Select(name => name!)
+            .Where(IsPresetForThisGame)
             .Order()
             .ToList();
 
@@ -2428,7 +2445,7 @@ internal sealed partial class RandomizerGame
             var host = string.IsNullOrWhiteSpace(config.PublicHost) ? "localhost" : config.PublicHost;
             var assetBaseUrl = $"http://{host}:{config.ReplayServerPort}";
 
-            await client.SendManialinkPageAsync(BuildTop10Manialink(leaderboard.GetTop(10), assetBaseUrl), cancellationToken: cancellationToken);
+            await client.SendManialinkPageAsync(BuildTop10Manialink(leaderboard.GetTop(10), assetBaseUrl, FavoriteServerUrl), cancellationToken: cancellationToken);
         }
         catch (Exception ex)
         {
@@ -2798,9 +2815,9 @@ internal sealed partial class RandomizerGame
     private const string DiscordInviteUrl = "https://discord.gg/HRShWnzpK3";
     // TMF prepends "http://" to a quad's url attribute itself, so it must be given without a scheme
     private const string DiscordInviteUrlNoScheme = "discord.gg/HRShWnzpK3";
-    private const string FavoriteServerUrl = "tmtp://#addfavourite=100_tmx-project";
+    private string FavoriteServerUrl => $"tmtp://#addfavourite={config.FavoriteLogin}";
 
-    private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top, string assetBaseUrl)
+    private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top, string assetBaseUrl, string favoriteUrl)
     {
         // manialink coordinates must use "." as the decimal separator regardless of the host
         // machine's locale - see the identical note on BuildPresetListManialink
@@ -2847,7 +2864,7 @@ internal sealed partial class RandomizerGame
                 <quad posn="64 20 4" sizen="{Inv(boxWidth)} {boxHeight}" halign="right" valign="top" bgcolor="0008"/>
                 {rows}
                 <quad posn="55.5 27 5" sizen="3.9 5.2" halign="left" valign="top" image="{assetBaseUrl}/discord.png" url="{DiscordInviteUrlNoScheme}"/>
-                <quad posn="60.1 27 5" sizen="3.9 5.2" halign="left" valign="top" image="{assetBaseUrl}/favorite.png" manialink="{FavoriteServerUrl}"/>
+                <quad posn="60.1 27 5" sizen="3.9 5.2" halign="left" valign="top" image="{assetBaseUrl}/favorite.png" manialink="{favoriteUrl}"/>
             </manialink>
             """;
     }

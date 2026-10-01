@@ -19,6 +19,12 @@ internal sealed class SkippedMaps
     private readonly string filePath = Path.Combine(AppContext.BaseDirectory, "skipped-maps.json");
     private readonly HashSet<int> trackIds = [];
     private readonly object gate = new();
+    private readonly RandomizerAnywhere.Config.AppConfig config;
+
+    public SkippedMaps(RandomizerAnywhere.Config.AppConfig config)
+    {
+        this.config = config;
+    }
 
     public bool Contains(int trackId)
     {
@@ -68,9 +74,14 @@ internal sealed class SkippedMaps
 
         lock (gate)
         {
-            foreach (var id in BuiltInSkippedMapIds)
+            // track ids belong to ONE exchange - 8468597 is a TMNF map and means something else on
+            // tmuf.exchange - so the built-in ids only apply to a server drawing from tmnf.exchange
+            if (config.EffectiveTmxGame == GameTitle.TMNF)
             {
-                changed |= trackIds.Add(id);
+                foreach (var id in BuiltInSkippedMapIds)
+                {
+                    changed |= trackIds.Add(id);
+                }
             }
 
             snapshot = [.. trackIds.Order()];

@@ -14,9 +14,12 @@ internal sealed class ImpossibleMaps
     private readonly HashSet<int> excludedTrackIds = [];
     private readonly object gate = new();
 
-    public ImpossibleMaps(HttpClient http)
+    private readonly RandomizerAnywhere.Config.AppConfig config;
+
+    public ImpossibleMaps(HttpClient http, RandomizerAnywhere.Config.AppConfig config)
     {
         this.http = http;
+        this.config = config;
     }
 
     public bool Contains(int trackId)
@@ -65,6 +68,15 @@ internal sealed class ImpossibleMaps
     // getting excluded without needing a restart
     public async Task RefreshFromSheetAsync(CancellationToken cancellationToken = default)
     {
+        // the shared sheet lists TMNF track ids; on another exchange the same numbers are different
+        // maps, so only a server drawing from tmnf.exchange may use it
+        if (config.EffectiveTmxGame != GameTitle.TMNF)
+        {
+            Console.WriteLine($"Impossible maps: shared sheet is TMNF-only, skipped for {config.EffectiveTmxGame} (local list only).");
+            await SaveAsync(cancellationToken);
+            return;
+        }
+
         try
         {
             var csv = await FetchFollowingRedirectsAsync(SheetCsvUrl, cancellationToken);

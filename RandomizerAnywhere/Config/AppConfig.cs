@@ -27,6 +27,18 @@ internal sealed class AppConfig
     public required string PublicHost { get; init; }
     public required ushort ReplayServerPort { get; init; }
     public required bool Lan { get; init; }
+    public required ushort ServerPort { get; init; }
+    public required ushort ServerP2PPort { get; init; }
+    public required string ServerLogin { get; init; }
+    public required string ServerPassword { get; init; }
+    public required string ServerValidationKey { get; init; }
+
+    // The login players add to their favourites (tmtp://#addfavourite=<login>). The first server's
+    // login predates the config key, so it stays the fallback.
+    public string FavoriteLogin => string.IsNullOrWhiteSpace(ServerLogin) ? "100_tmx-project" : ServerLogin;
+
+    // the TMX exchange this server draws maps from
+    public GameTitle EffectiveTmxGame => TmxGame ?? Game;
     public required string DiscordWebhookUrl { get; init; }
     public required string DiscordWebhookUrlHard { get; init; }
     public PresetConfig? LastPreset { get; set; }

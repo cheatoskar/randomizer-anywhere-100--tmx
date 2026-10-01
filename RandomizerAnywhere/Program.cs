@@ -35,7 +35,7 @@ var appConfig = provider.GetRequiredService<AppConfig>();
 if (appConfig.DedicatedServerMode)
 {
     var statusDir = Path.Combine(AppContext.BaseDirectory, "WebStatus");
-    var replayServer = new ReplayServer(serverSetup.ReplaysDir, statusDir, appConfig.ReplayServerPort);
+    var replayServer = new ReplayServer(serverSetup.ReplaysDir, statusDir, appConfig.ReplayServerPort, appConfig.ServerName, appConfig.FavoriteLogin);
     await replayServer.StartAsync();
 }
 
@@ -157,6 +157,11 @@ internal partial class AppServiceProvider
             PublicHost = Configurator.GetString(globalConfig.PublicHost, cmdValue: null, "RANDANY_PUBLIC_HOST"),
             ReplayServerPort = Configurator.GetNumber(globalConfig.ReplayServerPort, cmdValue: null, "RANDANY_REPLAY_SERVER_PORT"),
             Lan = Configurator.GetBool(globalConfig.Lan, cmdValue: null, "RANDANY_LAN"),
+            ServerPort = Configurator.GetNumber(globalConfig.ServerPort, cmdValue: null, "RANDANY_SERVER_PORT"),
+            ServerP2PPort = Configurator.GetNumber(globalConfig.ServerP2PPort, cmdValue: null, "RANDANY_SERVER_P2P_PORT"),
+            ServerLogin = Configurator.GetString(globalConfig.ServerLogin, cmdValue: null, "RANDANY_SERVER_LOGIN"),
+            ServerPassword = Configurator.GetString(globalConfig.ServerPassword, cmdValue: null, "RANDANY_SERVER_PASSWORD"),
+            ServerValidationKey = Configurator.GetString(globalConfig.ServerValidationKey, cmdValue: null, "RANDANY_SERVER_VALIDATION_KEY"),
             DiscordWebhookUrl = Configurator.GetString(globalConfig.DiscordWebhookUrl, cmdValue: null, "RANDANY_DISCORD_WEBHOOK_URL"),
             DiscordWebhookUrlHard = Configurator.GetString(globalConfig.DiscordWebhookUrlHard, cmdValue: null, "RANDANY_DISCORD_WEBHOOK_URL_HARD"),
         };

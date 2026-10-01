@@ -53,6 +53,22 @@ dotnet run --project RandomizerAnywhere
 
 Once ready, the server becomes available in your game's "Local network" menu (or on the public internet, once `Lan = false` and `PublicHost` are set).
 
+## Running a second server (TMUF) next to the first
+
+One machine can host several servers, each from its own folder with its own config, leaderboard and skip list. The TMUF server draws its maps from tmuf.exchange and uses the TMUF preset family (`*_tmuf`); `/presets` only lists presets for the game the server runs.
+
+Everything needed is in `deploy/tmuf/`:
+
+- `config.toml` - the TMUF configuration (own ports: game `2351`, peer-to-peer `3451`, XML-RPC `5001`, status page `8091`)
+- `100tmx-tmuf.service` - the systemd unit; it refuses to start until `ServerLogin` is filled in
+- `setup-tmuf.sh` - run on the server as root. It copies the application build, writes the config (taking admins, public host and Discord webhooks from the first server's config) and installs the unit. It starts nothing.
+
+After the script: open the ports in your firewall, fill in `ServerLogin`, `ServerPassword` and `ServerValidationKey` (the server account) in the TMUF `config.toml`, then `systemctl enable --now 100tmx-tmuf`.
+
+`deploy/deploy-when-empty.sh <build folder>` updates every server on the machine, each only after it has been empty for two minutes, and rolls back by itself if the new build does not come up healthy.
+
+New `config.toml` keys: `ServerPort`, `ServerP2PPort`, `ServerLogin`, `ServerPassword`, `ServerValidationKey` (also settable through `RANDANY_SERVER_*` environment variables). Left empty, the dedicated server's own `dedicated_cfg.txt` values are used unchanged.
+
 ## Presets
 
 Presets bundle a reusable set of options into a named `.toml` file, handy for sharing curated challenge packs without editing `config.toml` directly.

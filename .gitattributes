@@ -1,0 +1,4 @@
+# deploy scripts and unit files run on Linux: keep LF line endings, never CRLF
+deploy/** text eol=lf
+*.sh text eol=lf
+*.service text eol=lf

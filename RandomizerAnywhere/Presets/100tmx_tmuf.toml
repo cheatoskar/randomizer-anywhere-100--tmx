@@ -1,7 +1,7 @@
-DisplayName = "100% TMX Project (TMNF)"
-Games = ["TMNF"]
+DisplayName = "100% TMX Project (TMUF)"
+Games = ["TMUF"]
 
-TmxGame = "TMNF"
+TmxGame = "TMUF"
 AutoSkipMode = "Finished"
 
 [TmxQuery]

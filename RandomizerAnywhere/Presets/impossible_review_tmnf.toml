@@ -1,5 +1,5 @@
 DisplayName = "Impossible Review"
-Games = ["TMNF", "TMUF"]
+Games = ["TMNF"]
 
 TmxGame = "TMNF"
 AutoSkipMode = "None"

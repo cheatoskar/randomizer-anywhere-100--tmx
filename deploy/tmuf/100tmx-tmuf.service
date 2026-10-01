@@ -1,0 +1,22 @@
+[Unit]
+Description=100%% TMX Project (TMUF) - RandomizerAnywhere TMF dedicated server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/randomizer-anywhere-tmuf/publish
+# Refuse to start until the server account is filled in, so an early "enable --now" cannot
+# hammer the master server with an invalid login in a restart loop.
+ExecStartPre=/bin/sh -c 'grep -Eq "^ServerLogin *= *\\".+\\"" config.toml'
+ExecStart=/usr/share/dotnet/dotnet /opt/randomizer-anywhere-tmuf/publish/RandomizerAnywhere.dll --dedicated
+OOMScoreAdjust=-300
+Restart=always
+RestartSec=5
+Environment=DOTNET_ROOT=/usr/share/dotnet
+# below the TMNF server (1000) but well above the website, so a busy site can never starve it
+CPUWeight=500
+IOWeight=500
+MemoryLow=268435456
+
+[Install]
+WantedBy=multi-user.target

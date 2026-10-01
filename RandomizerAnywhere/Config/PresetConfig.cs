@@ -19,6 +19,10 @@ internal sealed class PresetConfig
     // impossible/cheated map ids (for admin review, not normal play)
     public bool SourceFromImpossibleList { get; set; }
 
+    // an empty Games list means "any game"
+    public bool SupportsGame(GameTitle game) =>
+        Games.Length == 0 || Games.Any(g => string.Equals(g, game.ToString(), StringComparison.OrdinalIgnoreCase));
+
     public void Apply(AppConfig config)
     {
         config.TimeLimit = new TimeInt32(TimeLimit);

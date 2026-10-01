@@ -1,7 +1,7 @@
 DisplayName = "Fullspeed"
-Games = ["TMNF"]
+Games = ["TMUF"]
 
-TmxGame = "TMNF"
+TmxGame = "TMUF"
 AutoSkipMode = "Finished"
 
 [TmxQuery]

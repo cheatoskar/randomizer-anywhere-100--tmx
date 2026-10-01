@@ -1,7 +1,7 @@
 DisplayName = "RPG Together"
-Games = ["TMNF"]
+Games = ["TMUF"]
 
-TmxGame = "TMNF"
+TmxGame = "TMUF"
 AutoSkipMode = "Finished"
 
 [TmxQuery]
