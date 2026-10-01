@@ -27,6 +27,7 @@ internal sealed class TmxRules
     private readonly HttpClient http;
     private readonly AppConfig config;
     private readonly ImpossibleMaps impossibleMaps;
+    private readonly SkippedMaps skippedMaps;
 
     private readonly GameTitle game;
     private readonly Dictionary<int, DateTimeOffset> recentlyServed = [];
@@ -38,11 +39,12 @@ internal sealed class TmxRules
 
     public void ExcludeForSession(int trackId) => sessionExcludedTrackIds.Add(trackId);
 
-    public TmxRules(HttpClient http, AppConfig config, ImpossibleMaps impossibleMaps)
+    public TmxRules(HttpClient http, AppConfig config, ImpossibleMaps impossibleMaps, SkippedMaps skippedMaps)
     {
         this.http = http;
         this.config = config;
         this.impossibleMaps = impossibleMaps;
+        this.skippedMaps = skippedMaps;
 
         game = config.TmxGame ?? config.Game;
     }
@@ -251,6 +253,14 @@ internal sealed class TmxRules
                 continue;
             }
 
+            // this server's own skip list (maps that can't be played here) - never picked, in any mode
+            if (skippedMaps.Contains(trackId))
+            {
+                // console only - players never see a skipped pick
+                Console.WriteLine($"Skip list: random pick {trackId} is on this server's skip list - picking another (never downloaded or sent to the game server).");
+                continue;
+            }
+
             PruneRecentlyServed();
 
             if (recentlyServed.ContainsKey(trackId) && attempt <= MaxRecencyCheckedAttempts)
@@ -259,9 +269,13 @@ internal sealed class TmxRules
             }
 
             Console.WriteLine("Next track ID: " + trackId);
+            Diagnostics.Trace($"tmx: picked {trackId} after {attempt} attempt(s), {searchWatch.ElapsedMilliseconds}ms");
             recentlyServed[trackId] = DateTimeOffset.UtcNow;
 
-            return (await http.GetAsync(GetTrackGbxUrl(trackIdString), cancellationToken), trackId);
+            var downloadWatch = Stopwatch.StartNew();
+            var gbxResponse = await http.GetAsync(GetTrackGbxUrl(trackIdString), cancellationToken);
+            Diagnostics.Trace($"tmx: downloaded {trackId} HTTP {(int)gbxResponse.StatusCode} in {downloadWatch.ElapsedMilliseconds}ms");
+            return (gbxResponse, trackId);
         }
 
         throw new InvalidOperationException($"Could not find a servable map after {MaxTotalAttempts} attempts (all candidates were excluded).");

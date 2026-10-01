@@ -15,6 +15,9 @@ var impossibleMaps = provider.GetRequiredService<ImpossibleMaps>();
 await impossibleMaps.LoadAsync();
 _ = impossibleMaps.RunPeriodicRefreshAsync(TimeSpan.FromHours(24), cts.Token);
 
+var skippedMaps = provider.GetRequiredService<SkippedMaps>();
+await skippedMaps.LoadAsync();
+
 var leaderboard = provider.GetRequiredService<Leaderboard>();
 await leaderboard.LoadAsync();
 
@@ -67,6 +70,7 @@ finally
 [Singleton(typeof(RemoteClient))]
 [Transient(typeof(RandomizerGame))]
 [Singleton(typeof(ImpossibleMaps))]
+[Singleton(typeof(SkippedMaps))]
 [Singleton(typeof(DiscordNotifier))]
 [Singleton(typeof(Leaderboard))]
 internal partial class AppServiceProvider

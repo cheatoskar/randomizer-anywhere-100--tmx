@@ -30,6 +30,67 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public XmlRpcClient Raw => raw ?? throw new InvalidOperationException("Client is not connected.");
 
+    // A call slower than this is worth a line in the journal on its own; healthy calls answer in
+    // milliseconds, so anything near this means the dedicated server (or the socket) is stalling.
+    private static readonly TimeSpan SlowRpcThreshold = TimeSpan.FromSeconds(2);
+
+    // Every call to the dedicated server goes through here so each one is timed and recorded in the
+    // flight recorder (see Diagnostics). Behaviour is unchanged: same call, same exceptions.
+    public async Task<T> TracedCallAsync<T>(string method, object[] parameters, CancellationToken cancellationToken = default)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        Diagnostics.Trace($"rpc> {method}");
+
+        try
+        {
+            var result = await Raw.CallAsync<T>(method, parameters, cancellationToken);
+            LogRpcFinished(method, startedAt, error: null);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LogRpcFinished(method, startedAt, ex);
+            throw;
+        }
+    }
+
+    public async Task<object?> TracedCallAsync(string method, object[] parameters, CancellationToken cancellationToken = default)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        Diagnostics.Trace($"rpc> {method}");
+
+        try
+        {
+            var result = await Raw.CallAsync(method, parameters, cancellationToken);
+            LogRpcFinished(method, startedAt, error: null);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LogRpcFinished(method, startedAt, ex);
+            throw;
+        }
+    }
+
+    private static void LogRpcFinished(string method, long startedAt, Exception? error)
+    {
+        var elapsed = Stopwatch.GetElapsedTime(startedAt);
+
+        if (error is null)
+        {
+            Diagnostics.Trace($"rpc< {method} {elapsed.TotalMilliseconds:0}ms");
+        }
+        else
+        {
+            Diagnostics.Trace($"rpc! {method} {elapsed.TotalMilliseconds:0}ms {error.GetType().Name}: {error.Message}");
+        }
+
+        if (elapsed >= SlowRpcThreshold)
+        {
+            Console.WriteLine($"[diag] slow call: {method} took {elapsed.TotalSeconds:0.0}s{(error is null ? string.Empty : $" and failed ({error.GetType().Name}: {error.Message})")}");
+        }
+    }
+
     private HashSet<string>? supportedMethods;
     private HashSet<string> SupportedMethods => supportedMethods ?? throw new InvalidOperationException("Client is not connected.");
 
@@ -51,7 +112,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task AuthenticateAsync(CancellationToken cancellationToken = default)
     {
-        var result = await Raw.CallAsync<bool>("Authenticate", ["SuperAdmin", "SuperAdmin"], cancellationToken);
+        var result = await TracedCallAsync<bool>("Authenticate", ["SuperAdmin", "SuperAdmin"], cancellationToken);
 
         if (!result)
         {
@@ -61,7 +122,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task SetServerNameAsync(string serverName, CancellationToken cancellationToken = default)
     {
-        var result = await Raw.CallAsync<bool>("SetServerName", [serverName], cancellationToken);
+        var result = await TracedCallAsync<bool>("SetServerName", [serverName], cancellationToken);
 
         if (!result)
         {
@@ -76,7 +137,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             return versionInfo;
         }
 
-        var versionDict = await Raw.CallAsync<Dictionary<string, object>>("GetVersion", [], cancellationToken);
+        var versionDict = await TracedCallAsync<Dictionary<string, object>>("GetVersion", [], cancellationToken);
 
         var buildString = versionDict.TryGetValue("Build", out var build) ? build as string : null;
         var buildDate = buildString is null ? default : DateTime.TryParseExact(buildString, buildFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedBuild) ? parsedBuild : default(DateTime?);
@@ -95,7 +156,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             return false;
         }
 
-        var result = await Raw.CallAsync<bool>("EnableCallbacks", [true], cancellationToken);
+        var result = await TracedCallAsync<bool>("EnableCallbacks", [true], cancellationToken);
 
         if (!result)
         {
@@ -115,7 +176,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             return;
         }
 
-        var tracksDirectory = await Raw.CallAsync<string>("GetTracksDirectory", [], cancellationToken);
+        var tracksDirectory = await TracedCallAsync<string>("GetTracksDirectory", [], cancellationToken);
 
         if (Path.GetDirectoryName(filePath) is string directoryRelativePath)
         {
@@ -127,7 +188,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task CallAsync(string methodName, object[] parameters, CancellationToken cancellationToken = default)
     {
-        var result = await Raw.CallAsync(methodName, parameters, cancellationToken);
+        var result = await TracedCallAsync(methodName, parameters, cancellationToken);
 
         if (result is false)
         {
@@ -137,7 +198,21 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task<IEnumerable<XmlRpcMulticallResult>> SystemMulticallAsync(IEnumerable<XmlRpcMulticall> calls, CancellationToken cancellationToken = default)
     {
-        return await Raw.SystemMulticallAsync(calls, cancellationToken);
+        var callList = calls.ToList();
+        var startedAt = Stopwatch.GetTimestamp();
+        Diagnostics.Trace($"rpc> multicall x{callList.Count}");
+
+        try
+        {
+            var result = await Raw.SystemMulticallAsync(callList, cancellationToken);
+            LogRpcFinished($"multicall x{callList.Count}", startedAt, error: null);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            LogRpcFinished($"multicall x{callList.Count}", startedAt, ex);
+            throw;
+        }
     }
 
     public async Task WaitForCloseAsync(CancellationToken cancellationToken)
@@ -147,13 +222,13 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task<string> GetPlayerNicknameAsync(string login, CancellationToken cancellationToken = default)
     {
-        var playerInfo = await Raw.CallAsync<Dictionary<string, object>>("GetPlayerInfo", [login], cancellationToken);
+        var playerInfo = await TracedCallAsync<Dictionary<string, object>>("GetPlayerInfo", [login], cancellationToken);
         return (string)playerInfo["NickName"];
     }
 
     public async Task<IEnumerable<string>> GetChatCommandListAsync(CancellationToken cancellationToken = default)
     {
-        var commandList = await Raw.CallAsync<List<object>>("GetChatCommandList", [(int)short.MaxValue, 0], cancellationToken);
+        var commandList = await TracedCallAsync<List<object>>("GetChatCommandList", [(int)short.MaxValue, 0], cancellationToken);
         return commandList.OfType<IReadOnlyDictionary<string, object>>()
             .Select(x => (string)x["Name"]);
     }
@@ -170,7 +245,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
     // The health check needs exactly that distinction; see RandomizerGame.CallbacksHealthy.
     public async Task<int> GetCurrentRankingCountAsync(CancellationToken cancellationToken = default)
     {
-        var ranking = await Raw.CallAsync<List<object>>("GetCurrentRanking", [200, 0], cancellationToken);
+        var ranking = await TracedCallAsync<List<object>>("GetCurrentRanking", [200, 0], cancellationToken);
         return ranking.OfType<Dictionary<string, object>>()
             .Count(p => p.TryGetValue("BestTime", out var best) && best is int time && time > 0);
     }
@@ -185,7 +260,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
     // used to pass 2 here, which silently capped the reported count at 2 once a 3rd player joined
     public async Task<IReadOnlyList<PlayerSummary>> GetPlayersAsync(CancellationToken cancellationToken = default)
     {
-        var playerList = await Raw.CallAsync<List<object>>("GetPlayerList", [200, 0], cancellationToken);
+        var playerList = await TracedCallAsync<List<object>>("GetPlayerList", [200, 0], cancellationToken);
         return playerList.OfType<Dictionary<string, object>>()
             .Where(p => p.TryGetValue("Login", out var login) && !string.IsNullOrEmpty(login as string))
             .Select(p => new PlayerSummary((string)p["Login"], (string)p["NickName"]))
@@ -194,7 +269,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
 
     public async Task<ChallengeSummary> GetChallengeInfoAsync(string fileName, CancellationToken cancellationToken = default)
     {
-        var mapInfo = await Raw.CallAsync<Dictionary<string, object>>("GetChallengeInfo", [fileName], cancellationToken);
+        var mapInfo = await TracedCallAsync<Dictionary<string, object>>("GetChallengeInfo", [fileName], cancellationToken);
         return ToChallengeSummary(mapInfo);
     }
 
@@ -203,23 +278,23 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
     // actually running right now
     public async Task<ChallengeSummary> GetCurrentChallengeInfoAsync(CancellationToken cancellationToken = default)
     {
-        var mapInfo = await Raw.CallAsync<Dictionary<string, object>>("GetCurrentChallengeInfo", [], cancellationToken);
+        var mapInfo = await TracedCallAsync<Dictionary<string, object>>("GetCurrentChallengeInfo", [], cancellationToken);
         return ToChallengeSummary(mapInfo);
     }
 
     public async Task SendManialinkPageAsync(string manialink, int timeoutSeconds = 0, bool hideOnClick = false, CancellationToken cancellationToken = default)
     {
-        await Raw.CallAsync("SendDisplayManialinkPage", [manialink, timeoutSeconds, hideOnClick], cancellationToken);
+        await TracedCallAsync("SendDisplayManialinkPage", [manialink, timeoutSeconds, hideOnClick], cancellationToken);
     }
 
     public async Task SendManialinkPageToLoginAsync(string login, string manialink, int timeoutSeconds = 0, bool hideOnClick = false, CancellationToken cancellationToken = default)
     {
-        await Raw.CallAsync("SendDisplayManialinkPageToLogin", [login, manialink, timeoutSeconds, hideOnClick], cancellationToken);
+        await TracedCallAsync("SendDisplayManialinkPageToLogin", [login, manialink, timeoutSeconds, hideOnClick], cancellationToken);
     }
 
     public async Task HideAllManialinksAsync(CancellationToken cancellationToken = default)
     {
-        await Raw.CallAsync("SendHideManialinkPage", [], cancellationToken);
+        await TracedCallAsync("SendHideManialinkPage", [], cancellationToken);
     }
 
     private static ChallengeSummary ToChallengeSummary(Dictionary<string, object> mapInfo)
@@ -250,7 +325,7 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
     // forever.
     public async Task<string?> FindSelectedChallengeFileNameAsync(string fileNameSuffix, CancellationToken cancellationToken = default)
     {
-        var list = await Raw.CallAsync<List<object>>("GetChallengeList", [1000, 0], cancellationToken);
+        var list = await TracedCallAsync<List<object>>("GetChallengeList", [1000, 0], cancellationToken);
         return list.OfType<Dictionary<string, object>>()
             .Select(c => c.TryGetValue("FileName", out var f) ? f as string : null)
             .FirstOrDefault(f => f is not null && f.EndsWith(fileNameSuffix, StringComparison.OrdinalIgnoreCase));
@@ -302,6 +377,8 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             handlerTimeout.CancelAfter(HandlerTimeout);
 
             var startedAt = Stopwatch.GetTimestamp();
+            var handlerId = Diagnostics.HandlerStarted(methodName);
+            Diagnostics.Trace($"cb> {methodName}");
 
             try
             {
@@ -315,11 +392,18 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             }
             finally
             {
+                Diagnostics.HandlerFinished(handlerId);
                 var elapsed = Stopwatch.GetElapsedTime(startedAt);
+                Diagnostics.Trace($"cb< {methodName} {elapsed.TotalMilliseconds:0}ms");
 
                 if (elapsed >= SlowHandlerWarning)
                 {
                     Console.WriteLine($"Warning: the {methodName} handler held the callback stream for {elapsed.TotalSeconds:0.0}s - every other callback was queued behind it.");
+                    Diagnostics.Dump($"{methodName} handler held the callback stream for {elapsed.TotalSeconds:0.0}s");
+                }
+                else if (elapsed >= SlowRpcThreshold)
+                {
+                    Console.WriteLine($"[diag] slow handler: {methodName} took {elapsed.TotalSeconds:0.0}s");
                 }
             }
         });

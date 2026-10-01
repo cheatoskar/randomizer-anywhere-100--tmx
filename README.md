@@ -155,6 +155,7 @@ Beyond the game/server basics, `config.toml` (see `config.default.toml` for the 
 | `/presets` | Lists all available presets, and opens a clickable widget to vote for one. |
 | `/votepreset <name>` | Starts a vote to switch preset; other players support it with `/yes` (or the Yes/No widget) within the vote window. |
 | `/loadmap <TMX id>` | Loads a specific TMX map by id directly, no vote (admin only if `AdminLogins` is set). |
+| `/blockmap [-1..-10]` | Adds the current (or a past) map to this server's own skip list (`skipped-maps.json`) and skips it now. For maps that can't be played here, e.g. built with blocks the game doesn't have. Permanent, local to the server, never sent to Discord or the shared sheet (admin only if `AdminLogins` is set). |
 | `/votemap <TMX id>` | Starts a vote to load a specific TMX map by id - shows its name, author, difficulty, awards, author time, and style tags in chat and a clickable widget; other players support it with `/yes` within the vote window. |
 | `/yes`, `/no` | Supports or withdraws support from an active preset or map vote. |
 | `/commands` | Lists every raw command name. |

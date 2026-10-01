@@ -67,6 +67,8 @@ internal sealed partial class RandomizerGame
     // "this specific TMX id" without duplicating the enqueue/insert/gamemode plumbing
     private int? forcedNextMapTrackId;
 
+    private readonly SkippedMaps skippedMaps;
+
     private string? votePresetName;
     private int? voteMapTrackId;
     private HashSet<string>? voteYesLogins;
@@ -78,6 +80,38 @@ internal sealed partial class RandomizerGame
     // advancing the dedicated server one extra map past what pendingMapTrackId/currentMapTrackId
     // account for - which is exactly what made /map, /imp and /hard report the previous map
     private DateTimeOffset? advanceStartedAt;
+
+    // Diagnostics only: which step of NextRandomMapAsync is running right now, and which step of
+    // the status write is running, so a stall or a dropped connection can be pinned to a step.
+    private volatile string advanceStage = "idle";
+    private volatile string statusStage = "idle";
+
+    private void SetAdvanceStage(string stage)
+    {
+        advanceStage = stage;
+        Diagnostics.Trace($"advance: {stage}");
+    }
+
+    private void SetStatusStage(string stage)
+    {
+        statusStage = stage;
+        Diagnostics.Trace($"status: {stage}");
+    }
+
+    // The evidence behind CallbacksHealthy, printed whenever the stream is judged dead so it is
+    // possible to tell afterwards whether the verdict was right.
+    private string DescribeCallbackState()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var lastCallbackAge = (now - client.LastCallbackAt).TotalSeconds;
+        var racingGap = lastRacingProgressAt is { } racingAt ? (racingAt - client.LastCallbackAt).TotalSeconds : (double?)null;
+        var mapGap = currentMapStartedAt is { } startedAt ? (lastPolledMapChangedAt - startedAt).TotalSeconds : (double?)null;
+
+        return $"callbacks: received={client.CallbacksReceived} lastCallbackAge={lastCallbackAge:0.0}s "
+            + $"racingProgressAhead={(racingGap is { } r ? $"{r:0.0}s (limit {CallbackRacingGracePeriod.TotalSeconds:0}s)" : "n/a")} "
+            + $"mapChangeWithoutBeginRace={(mapGap is { } m ? $"{m:0.0}s (limit {CallbackGracePeriod.TotalSeconds:0}s)" : "n/a")} "
+            + $"rankedCount={lastPolledRankedCount} players={lastOnlinePlayerCount} advancing={isAdvancingToNextMap} reconnecting={reconnectInProgress}";
+    }
 
     // An advance still "in flight" after this long is treated as dead rather than blocking
     // every future one. Without it a single hung RPC latched the guard permanently and
@@ -184,8 +218,9 @@ internal sealed partial class RandomizerGame
 
     private bool SessionActive => sessionStopwatch is not null;
 
-    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, DiscordNotifier discordNotifier, Leaderboard leaderboard)
+    public RandomizerGame(RemoteClient client, TmxRules tmxRules, AppConfig config, DiscordNotifier discordNotifier, Leaderboard leaderboard, SkippedMaps skippedMaps)
     {
+        this.skippedMaps = skippedMaps;
         this.client = client;
         this.tmxRules = tmxRules;
         this.config = config;
@@ -199,6 +234,7 @@ internal sealed partial class RandomizerGame
             ["end"] = StopAsync,
             ["skip"] = SkipAsync,
             ["imp"] = ImpossibleAsync,
+            ["blockmap"] = BlockMapAsync,
             ["hard"] = HardAsync,
             ["top"] = TopAsync,
             ["rank"] = RankAsync,
@@ -274,6 +310,28 @@ internal sealed partial class RandomizerGame
                 }
 
                 currentMapCheckpointTotal = info.NbCheckpoints;
+
+                // Fallback only. A skip-listed map is kept out before it ever reaches the game server
+                // (see TmxRules pick, /loadmap, /votemap and the guard in NextRandomMapAsync), so this
+                // should never fire. If one does get on anyway - say the id was added to the file
+                // while that map was already queued - move straight on, from a separate task so this
+                // handler, which holds the whole callback stream, isn't stuck waiting on a TMX fetch.
+                if (currentMapTrackId is { } skippedId && skippedMaps.Contains(skippedId) && SessionActive)
+                {
+                    Console.WriteLine($"Skip list: map {skippedId} came up but is on this server's skip list - moving on.");
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(1500);
+                            await NextRandomMapAsync(goalReached: false, CancellationToken.None);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Warning: couldn't skip past skip-listed map {skippedId} - {ex.Message}");
+                        }
+                    });
+                }
 
                 // a map with no checkpoints at all has nothing to count, and "0/0" is just noise
                 if (info.NbCheckpoints is { } total && total > 0)
@@ -681,14 +739,17 @@ internal sealed partial class RandomizerGame
         while (!cancellationToken.IsCancellationRequested)
         {
             var generation = Volatile.Read(ref reconnectGeneration);
+            Exception? closeError = null;
+            var closeWaitStartedAt = Stopwatch.GetTimestamp();
 
             try
             {
                 await client.WaitForCloseAsync(cancellationToken);
             }
-            catch (Exception) when (!cancellationToken.IsCancellationRequested)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 // the connection was torn out from under us by a reconnect
+                closeError = ex;
             }
 
             if (cancellationToken.IsCancellationRequested)
@@ -704,6 +765,19 @@ internal sealed partial class RandomizerGame
                 // dead - that is exactly how it sat down for two days from 2026-09-04 19:18.
                 // Exit non-zero so it is recorded as a failure and systemd brings it back.
                 Console.WriteLine("ERROR: the game server closed the XML-RPC connection - exiting so systemd restarts us.");
+
+                // The one event nobody has been able to explain: 6 exits in 12 days, all right after
+                // the same map was picked, and the dedicated server never crashed on its own. Record
+                // everything needed to tell "the socket dropped while the server kept running" (the
+                // dedicated process is still alive below) from "the server really went away".
+                Diagnostics.Dump(
+                    "XML-RPC connection closed with no reconnect of ours",
+                    $"WaitForCloseAsync {(closeError is null ? "returned normally" : $"threw {closeError.GetType().FullName}: {closeError.Message}")} after "
+                    + $"{Stopwatch.GetElapsedTime(closeWaitStartedAt).TotalMinutes:0.0} min | reconnectInProgress={reconnectInProgress} generation={generation} | "
+                    + $"advance: stage='{advanceStage}' {(advanceStartedAt is { } adv ? $"running for {(DateTimeOffset.UtcNow - adv).TotalSeconds:0.0}s" : "not running")} | "
+                    + $"{DescribeCallbackState()} | pending/forced map ids: pending={pendingMapTrackId} forced={forcedNextMapTrackId}",
+                    recentLines: 150,
+                    force: true);
                 await Console.Out.FlushAsync(cancellationToken);
                 Environment.Exit(75);
             }
@@ -834,6 +908,8 @@ internal sealed partial class RandomizerGame
         }
     }
 
+    private int statusTicks;
+
     private async Task StatusWriteLoopAsync(CancellationToken cancellationToken)
     {
         while (true)
@@ -846,11 +922,19 @@ internal sealed partial class RandomizerGame
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                Console.WriteLine("Warning: status.json write timed out, retrying next tick.");
+                Console.WriteLine($"Warning: status.json write timed out (stuck on '{statusStage}'), retrying next tick.");
+                Diagnostics.Dump($"status.json write timed out on '{statusStage}'", recentLines: 25);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Warning: failed to write status.json - {ex.Message}");
+            }
+
+            // A quiet baseline (one line every 5 minutes) so that when something stalls it can be
+            // compared with what "normal" looked like: dedicated server CPU, thread pool, load.
+            if (++statusTicks % 30 == 0)
+            {
+                Console.WriteLine($"[diag] health: {Diagnostics.Snapshot()} | {DescribeCallbackState()}");
             }
 
             if (CallbacksHealthy)
@@ -866,6 +950,13 @@ internal sealed partial class RandomizerGame
                         "ERROR: the callback stream from the dedicated server is dead. The controller "
                         + "is still polling but no longer driving the game - no chat commands, widgets "
                         + "or map picks, and the playlist will just repeat. Restarting once empty.");
+
+                    // 42 of these in 15 days, most of them right after a map change - so log the
+                    // numbers behind the verdict and the last minutes of activity, to learn whether
+                    // the stream really died or the check fired while a map swap was in progress.
+                    Diagnostics.Dump(
+                        "callback stream judged dead",
+                        $"{DescribeCallbackState()} | advance stage='{advanceStage}' | status stage='{statusStage}'");
                 }
 
                 // Rebuild the connection rather than the process: this works with a full
@@ -880,6 +971,7 @@ internal sealed partial class RandomizerGame
     private async Task WriteStatusAsync(CancellationToken cancellationToken)
     {
         IReadOnlyList<PlayerSummary> onlinePlayers = [];
+        SetStatusStage("GetPlayerList");
         try
         {
             onlinePlayers = await client.GetPlayersAsync(cancellationToken);
@@ -896,6 +988,7 @@ internal sealed partial class RandomizerGame
         // Gating all of it on the id blanked the entire status page for a map we couldn't identify.
         string? mapName = null;
         int? nbCheckpoints = null;
+        SetStatusStage("GetCurrentChallengeInfo");
         try
         {
             var info = await client.GetCurrentChallengeInfoAsync(cancellationToken);
@@ -923,6 +1016,7 @@ internal sealed partial class RandomizerGame
 
         // Second witness: the server's own record of who has a time on this map. It only ever
         // grows within a map, and it grows precisely when a callback should have fired.
+        SetStatusStage("GetCurrentRanking");
         try
         {
             var rankedCount = await client.GetCurrentRankingCountAsync(cancellationToken);
@@ -979,9 +1073,11 @@ internal sealed partial class RandomizerGame
             UpdatedAt = DateTimeOffset.UtcNow,
         };
 
+        SetStatusStage("writing status.json to disk");
         Directory.CreateDirectory(Path.GetDirectoryName(statusFilePath)!);
         var json = JsonSerializer.Serialize(status);
         await File.WriteAllTextAsync(statusFilePath, json, cancellationToken);
+        SetStatusStage("idle");
     }
 
     private async Task StartAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
@@ -1275,6 +1371,44 @@ internal sealed partial class RandomizerGame
         }
     }
 
+    // This server's own skip list: for a map that can't be played here at all (built with blocks the
+    // game doesn't have, so it fails to load). Unlike /imp it is permanent, stays on this server, and
+    // is never sent to Discord or the shared sheet. Admin-only when admins are configured, because
+    // it removes a map from the pool for good.
+    private async Task BlockMapAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
+    {
+        if (config.AdminLogins.Count > 0 && !config.AdminLogins.Contains(login))
+        {
+            await SendMessageAsync(login, "$F00Only server admins can add a map to the skip list.", cancellationToken);
+            return;
+        }
+
+        var (trackId, isCurrent) = ResolveMapReference(args);
+
+        if (trackId is not { } id)
+        {
+            await SendMessageAsync(login, "$F00No map is currently loaded.", cancellationToken);
+            return;
+        }
+
+        var added = await skippedMaps.AddAsync(id, cancellationToken);
+        tmxRules.ExcludeForSession(id);
+
+        Console.WriteLine($"Skip list: {GetPlainNickname(login)} {(added ? "added" : "re-confirmed")} map {id} ({skippedMaps.Count} on the list).");
+
+        var skipSuffix = isCurrent ? ", skipping it now" : string.Empty;
+        await SendMessageAsync(
+            added
+                ? $"$FF0Map {id} added to this server's skip list by {GetNicknameOrLogin(login)} - it won't be picked again{skipSuffix}."
+                : $"$FF0Map {id} is already on this server's skip list{skipSuffix}.",
+            cancellationToken);
+
+        if (isCurrent)
+        {
+            await NextRandomMapAsync(goalReached: false, cancellationToken);
+        }
+    }
+
     private async Task HardAsync(int playerUid, string login, string[] args, CancellationToken cancellationToken)
     {
         var (trackId, _) = ResolveMapReference(args);
@@ -1459,7 +1593,7 @@ internal sealed partial class RandomizerGame
             "$FF0/votemap <TMX id>$FFF - propose loading a specific TMX map by id, shows name/author/difficulty/AT/tags, others confirm with $0F0/yes$FFF",
             "$FF0/commands$FFF - list every raw command name",
             "$FF0/source$FFF - get the source code link for this modified server (AGPLv3)",
-            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/loadmap <TMX id>$FFF, $FF0/timelimit$FFF",
+            "Admin-only: $FF0/start$FFF, $FF0/stop$FFF, $FF0/preset$FFF, $FF0/loadmap <TMX id>$FFF, $FF0/blockmap$FFF (server-only skip list), $FF0/timelimit$FFF",
         ], cancellationToken);
     }
 
@@ -1824,6 +1958,12 @@ internal sealed partial class RandomizerGame
             return;
         }
 
+        if (skippedMaps.Contains(trackId))
+        {
+            await SendMessageAsync(login, $"$F00Map {trackId} is on this server's skip list and can't be loaded here.", cancellationToken);
+            return;
+        }
+
         TmxRules.TrackDetails details;
         try
         {
@@ -1844,6 +1984,12 @@ internal sealed partial class RandomizerGame
         if (args.Length == 0 || !int.TryParse(args[0], out var trackId))
         {
             await SendMessageAsync(login, "Usage: $FF0/votemap <TMX id>$FFF, then others type $FF0/yes$FFF to support.", cancellationToken);
+            return;
+        }
+
+        if (skippedMaps.Contains(trackId))
+        {
+            await SendMessageAsync(login, $"$F00Map {trackId} is on this server's skip list and can't be loaded here.", cancellationToken);
             return;
         }
 
@@ -2073,6 +2219,7 @@ internal sealed partial class RandomizerGame
         }
 
         advanceStartedAt = DateTimeOffset.UtcNow;
+        SetAdvanceStage($"start (goalReached={goalReached}, forced={forcedNextMapTrackId}, alreadyQueued={randomEnqueuedMapFileName is not null})");
         try
         {
             // In case there are multiple players, the session stopwatch cannot be stopped immediately
@@ -2085,10 +2232,23 @@ internal sealed partial class RandomizerGame
             // is exactly why /votemap "sometimes didn't load the right map".
             if (randomEnqueuedMapFileName is null || forcedNextMapTrackId is not null)
             {
+                SetAdvanceStage("picking and downloading the next map from TMX");
                 var nextMap = forcedNextMapTrackId is { } forcedTrackId
                     ? await tmxRules.GetMapGbxByIdAsync(forcedTrackId, cancellationToken)
                     : await tmxRules.NextMapGbxAsync(cancellationToken);
                 forcedNextMapTrackId = null;
+                SetAdvanceStage($"downloaded map {nextMap.TrackId} '{nextMap.FileName}' ({nextMap.Data.Length} bytes)");
+
+                // Last line of defence. The random pick and /loadmap + /votemap already refuse
+                // skip-listed maps, so this should never fire - but if any route ever hands one
+                // over, it must die HERE, before the file is written or inserted. Once the game
+                // server has the map it can be loaded, and loading a map the game can't open
+                // drops every player.
+                if (skippedMaps.Contains(nextMap.TrackId))
+                {
+                    forcedNextMapTrackId = null;
+                    throw new InvalidOperationException($"map {nextMap.TrackId} is on this server's skip list");
+                }
 
                 // InsertChallenge de-dupes by the challenge's UID against the server's WHOLE selection
                 // (playlist), not by the file path we write it under - and that selection only ever
@@ -2097,7 +2257,11 @@ internal sealed partial class RandomizerGame
                 // server's uptime and every future InsertChallenge for it fails with "already added",
                 // no matter what's currently loaded. Reuse the existing selection entry instead of
                 // fighting that permanent case.
+                SetAdvanceStage("asking the server for its map list (GetChallengeList)");
                 var mapPath = await client.FindSelectedChallengeFileNameAsync(nextMap.FileName, cancellationToken);
+                SetAdvanceStage(mapPath is null
+                    ? "map not in the server's list yet - writing file and inserting"
+                    : $"map already in the server's list as '{mapPath}' - reusing it");
 
                 if (mapPath is null)
                 {
@@ -2126,6 +2290,7 @@ internal sealed partial class RandomizerGame
                     }
                 }
 
+                SetAdvanceStage("SetGameMode");
                 await client.CallAsync("SetGameMode", [1], cancellationToken);
 
                 // Both paths above end up here, so a reused selection entry inserted under the
@@ -2181,12 +2346,20 @@ internal sealed partial class RandomizerGame
                 // The server then sat on that map indefinitely, because with AutoSkipMode=Finished
                 // nothing advances a map nobody can finish and the stalled-map watchdog only fires
                 // on an empty server. Every restart stranded players on the warmup map.
+                SetAdvanceStage("NextChallenge");
                 await CallWithTransitionRetryAsync("NextChallenge", [], cancellationToken);
+                SetAdvanceStage("NextChallenge sent");
             }
+        }
+        catch (Exception ex)
+        {
+            Diagnostics.Trace($"advance FAILED at '{advanceStage}': {ex.GetType().Name}: {ex.Message}");
+            throw;
         }
         finally
         {
             advanceStartedAt = null;
+            advanceStage = "idle";
         }
     }
 
@@ -2251,7 +2424,11 @@ internal sealed partial class RandomizerGame
     {
         try
         {
-            await client.SendManialinkPageAsync(BuildTop10Manialink(leaderboard.GetTop(10)), cancellationToken: cancellationToken);
+            // button icons are served by the built-in web server (see ReplayServer), same host as the replay links
+            var host = string.IsNullOrWhiteSpace(config.PublicHost) ? "localhost" : config.PublicHost;
+            var assetBaseUrl = $"http://{host}:{config.ReplayServerPort}";
+
+            await client.SendManialinkPageAsync(BuildTop10Manialink(leaderboard.GetTop(10), assetBaseUrl), cancellationToken: cancellationToken);
         }
         catch (Exception ex)
         {
@@ -2505,8 +2682,30 @@ internal sealed partial class RandomizerGame
     // falling back to plain text
     private static string TruncateForDisplayWidth(string nickname, double widthBudget)
     {
+        // Two passes: measure the whole name first, so a name that fits is never cut. Only a name
+        // that doesn't fit gets truncated, and then the "…" is paid for out of the budget - it used
+        // to be appended for free, which pushed an already-full row past the edge of the panel.
+        if (MeasureDisplayWidth(nickname, int.MaxValue, out _) <= widthBudget)
+        {
+            return nickname;
+        }
+
+        MeasureDisplayWidth(nickname, widthBudget - WideCharWidth, out var cutIndex);
+        return nickname[..cutIndex] + "…";
+    }
+
+    // Walks the name tracking the $-code state that changes how wide text renders ($o bold, $w wide,
+    // $n narrow, $z reset). Stops at the first character that would push the width past the limit
+    // and reports its index; returns the width consumed so far (the full width if nothing overflowed).
+    private static double MeasureDisplayWidth(string nickname, double limit, out int cutIndex)
+    {
         var width = 0.0;
+        var scale = 1.0;
+        var bold = false;
+        var wide = false;
+        var narrow = false;
         var i = 0;
+        cutIndex = nickname.Length;
 
         while (i < nickname.Length)
         {
@@ -2515,29 +2714,93 @@ internal sealed partial class RandomizerGame
                 var codeMatch = TmFormatCodeRegex().Match(nickname, i);
                 if (codeMatch.Success && codeMatch.Index == i)
                 {
+                    var code = codeMatch.Groups[1].Value;
+                    if (code == "$")
+                    {
+                        // "$$" renders one literal dollar sign
+                        if (width + scale > limit)
+                        {
+                            cutIndex = i;
+                            return width;
+                        }
+
+                        width += scale;
+                    }
+                    else if (code.Length == 1)
+                    {
+                        switch (char.ToLowerInvariant(code[0]))
+                        {
+                            case 'o': bold = true; break;
+                            case 'w': wide = true; narrow = false; break;
+                            case 'n': narrow = true; wide = false; break;
+                            case 'z': bold = false; wide = false; narrow = false; break;
+                        }
+
+                        scale = (bold ? 1.15 : 1.0) * (wide ? 1.4 : narrow ? 0.7 : 1.0);
+                    }
+
                     i += codeMatch.Length;
                     continue;
                 }
             }
 
-            var charWidth = nickname[i] <= 0x7F ? 1.0 : WideCharWidth;
-            if (width + charWidth > widthBudget)
+            var charWidth = GetGlyphWidth(nickname, i, out var length) * scale;
+            if (width + charWidth > limit)
             {
-                return nickname[..i] + "…";
+                cutIndex = i;
+                return width;
             }
 
             width += charWidth;
-            i++;
+            i += length;
         }
 
-        return nickname;
+        return width;
     }
+
+    // Rendered width of the character at index (in units of one plain ASCII character). Flat
+    // "non-ASCII = 1.8" undercounted the East Asian symbols and Korean jamo some players put in
+    // their names, which render roughly three characters wide, so those rows spilled out of the
+    // top 10 panel. Combining marks add almost nothing; a surrogate pair is one glyph.
+    private static double GetGlyphWidth(string text, int index, out int length)
+    {
+        length = 1;
+        var c = text[index];
+
+        if (c <= 0x7F)
+        {
+            return 1.0;
+        }
+
+        if (char.IsHighSurrogate(c) && index + 1 < text.Length && char.IsLowSurrogate(text[index + 1]))
+        {
+            length = 2;
+            return EastAsianWideWidth;
+        }
+
+        return c switch
+        {
+            >= '̀' and <= 'ͯ' => 0.3,                                   // combining diacritics
+            >= 'ᄀ' and <= 'ᇿ' => EastAsianWideWidth,                    // Hangul jamo
+            >= '⺀' and <= '鿿' => EastAsianWideWidth,                    // CJK symbols, kana, ideographs
+            >= '가' and <= '힯' => EastAsianWideWidth,                    // Hangul syllables
+            >= '＀' and <= '￯' => EastAsianWideWidth,                    // fullwidth forms
+            _ => WideCharWidth,
+        };
+    }
+
+    private const double EastAsianWideWidth = 3.0;
 
     // gold/silver/bronze colors for the top 3 ranks - "$o" bolds, reset with "$z" before the name
     // itself so a player's own raw nickname color (or the default white) takes back over
     private static readonly string[] RankColors = ["FD0", "CCC", "C83"];
 
-    private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top)
+    private const string DiscordInviteUrl = "https://discord.gg/HRShWnzpK3";
+    // TMF prepends "http://" to a quad's url attribute itself, so it must be given without a scheme
+    private const string DiscordInviteUrlNoScheme = "discord.gg/HRShWnzpK3";
+    private const string FavoriteServerUrl = "tmtp://#addfavourite=100_tmx-project";
+
+    private static string BuildTop10Manialink(IReadOnlyList<LeaderboardEntry> top, string assetBaseUrl)
     {
         // manialink coordinates must use "." as the decimal separator regardless of the host
         // machine's locale - see the identical note on BuildPresetListManialink
@@ -2551,7 +2814,10 @@ internal sealed partial class RandomizerGame
         const double boxWidth = 17.0;
         const double boxCenterX = 64.0 - (boxWidth / 2.0);
 
-        rows.AppendLine($"""<label posn="{Inv(boxCenterX)} 18 5" halign="center" valign="center" textsize="1.9" textcolor="FF0F" text="$s$oTop Finishers"/>""");
+        rows.AppendLine($"""<label posn="{Inv(boxCenterX)} 18 5" halign="center" valign="center" textsize="1.6" textcolor="FF0F" text="$s$oTop 10 Finishers"/>""");
+
+        // thin yellow rule under the header, same color as the header text
+        rows.AppendLine($"""<quad posn="{Inv(64.0 - boxWidth + 0.8)} 16.6 5" sizen="{Inv(boxWidth - 1.6)} 0.2" halign="left" valign="center" bgcolor="FF0F"/>""");
 
         for (var i = 0; i < top.Count; i++)
         {
@@ -2578,8 +2844,10 @@ internal sealed partial class RandomizerGame
 
         return $"""
             <manialink id="top10_panel" version="1">
-                <quad posn="64 20 4" sizen="{Inv(boxWidth)} {boxHeight}" halign="right" valign="top" bgcolor="000A"/>
+                <quad posn="64 20 4" sizen="{Inv(boxWidth)} {boxHeight}" halign="right" valign="top" bgcolor="0008"/>
                 {rows}
+                <quad posn="55.5 27 5" sizen="3.9 5.2" halign="left" valign="top" image="{assetBaseUrl}/discord.png" url="{DiscordInviteUrlNoScheme}"/>
+                <quad posn="60.1 27 5" sizen="3.9 5.2" halign="left" valign="top" image="{assetBaseUrl}/favorite.png" manialink="{FavoriteServerUrl}"/>
             </manialink>
             """;
     }

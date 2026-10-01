@@ -12,7 +12,7 @@ internal sealed class RandomizerSetup
     private readonly TmxRules tmxRules;
     private readonly AppConfig config;
 
-    private readonly HashSet<string> commands = ["help", "commands", "info", "source", "start", "skip", "imp", "hard", "top", "rank", "map", "history", "rounds", "testhud", "tmxquery", "timelimit", "tl", "stop", "preset", "presets", "votepreset", "yes", "no", "loadmap", "votemap"];
+    private readonly HashSet<string> commands = ["help", "commands", "info", "source", "start", "skip", "imp", "hard", "top", "rank", "map", "history", "rounds", "testhud", "tmxquery", "timelimit", "tl", "stop", "preset", "presets", "votepreset", "yes", "no", "loadmap", "votemap", "blockmap"];
 
     public RandomizerSetup(RemoteClient client, TmxRules tmxRules, AppConfig config)
     {
@@ -48,9 +48,9 @@ internal sealed class RandomizerSetup
 
         await client.EnableCallbacksAsync(cancellationToken);
 
-        await client.Raw.CallAsync("SetTimeAttackLimit", [0], cancellationToken);
-        await client.Raw.CallAsync("SetChatTime", [0], cancellationToken);
-        await client.Raw.CallAsync("AutoSaveValidationReplays", [true], cancellationToken);
+        await client.TracedCallAsync("SetTimeAttackLimit", [0], cancellationToken);
+        await client.TracedCallAsync("SetChatTime", [0], cancellationToken);
+        await client.TracedCallAsync("AutoSaveValidationReplays", [true], cancellationToken);
 
         if (!config.DedicatedServerMode)
         {
