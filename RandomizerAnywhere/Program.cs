@@ -39,10 +39,52 @@ if (appConfig.DedicatedServerMode)
     await replayServer.StartAsync();
 }
 
+await Task.Delay(1000, cts.Token);
+
 try
 {
-    var randomizerSetup = provider.GetRequiredService<RandomizerSetup>();
-    await randomizerSetup.RunAsync(cts.Token);
+    const int maxSetupAttempts = 3;
+    var setupCompleted = false;
+
+    for (var attempt = 1; attempt <= maxSetupAttempts; attempt++)
+    {
+        using var setupCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+        setupCts.CancelAfter(TimeSpan.FromSeconds(30));
+
+        try
+        {
+            Console.WriteLine($"Starting controller setup (attempt {attempt}/{maxSetupAttempts})...");
+            var randomizerSetup = provider.GetRequiredService<RandomizerSetup>();
+            await randomizerSetup.RunAsync(setupCts.Token);
+            setupCompleted = true;
+            break;
+        }
+        catch (OperationCanceledException) when (!cts.IsCancellationRequested && setupCts.IsCancellationRequested)
+        {
+            Console.WriteLine($"ERROR: Controller setup timed out after 30s on attempt {attempt}/{maxSetupAttempts}.");
+            var client = provider.GetRequiredService<RemoteClient>();
+            await client.DisposeAsync();
+            if (attempt < maxSetupAttempts)
+            {
+                await Task.Delay(2000, cts.Token);
+            }
+        }
+        catch (Exception ex) when (!cts.IsCancellationRequested)
+        {
+            Console.WriteLine($"ERROR: Controller setup failed on attempt {attempt}/{maxSetupAttempts}: {ex.Message}");
+            var client = provider.GetRequiredService<RemoteClient>();
+            await client.DisposeAsync();
+            if (attempt < maxSetupAttempts)
+            {
+                await Task.Delay(2000, cts.Token);
+            }
+        }
+    }
+
+    if (!setupCompleted && !cts.IsCancellationRequested)
+    {
+        throw new InvalidOperationException("Controller XML-RPC setup failed after multiple attempts.");
+    }
 
     var randomizerGame = provider.GetRequiredService<RandomizerGame>();
     await randomizerGame.RunAsync(cts.Token);

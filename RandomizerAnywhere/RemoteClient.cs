@@ -493,11 +493,15 @@ internal sealed class RemoteClient : IAsyncDisposable, IDisposable
             await raw.DisposeAsync();
             raw = null;
         }
+        supportedMethods = null;
+        versionInfo = null;
     }
 
     public void Dispose()
     {
         raw?.Dispose();
         raw = null;
+        supportedMethods = null;
+        versionInfo = null;
     }
 }
